@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>StatsMaster Calibrator</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  body{font-family:system-ui,Segoe UI,Arial,sans-serif;margin:16px;}
+  .row{display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+  canvas{max-width:100%;border:1px solid #ccc;border-radius:8px}
+  .panel{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .tag{padding:4px 8px;border:1px solid #ddd;border-radius:8px;cursor:pointer}
+  .tag.active{background:#eef;border-color:#99f}
+  textarea{width:100%;height:160px}
+  small{color:#666}
+</style>
+</head>
+<body>
+<h2>StatsMaster — Calibrate regions</h2>
+<div class="panel">
+  <input type="file" id="file" accept="image/png,image/jpeg" />
+  <button id="loadJson">Load JSON</button>
+  <button id="copyJson">Copy JSON</button>
+  <span id="info"></span>
+</div>
+
+<div class="row" style="margin:8px 0">
+  <div class="tag" data-k="id">1) id</div>
+  <div class="tag" data-k="name">2) name</div>
+  <div class="tag" data-k="power">3) power</div>
+  <div class="tag" data-k="dead">4) dead</div>
+  <div class="tag" data-k="t5">5) t5</div>
+  <div class="tag" data-k="t4">6) t4</div>
+  <div class="tag" data-k="t3">7) t3</div>
+  <div class="tag" data-k="t2">8) t2</div>
+  <div class="tag" data-k="t1">9) t1</div>
+</div>
+
+<canvas id="cvs"></canvas>
+<p><small>Поради: ЛКМ — тягни, щоб створити/оновити прямокутник для обраного тегу. Клавіші 1–9 — вибір тегу. Стрілки — нудж 1 px (з Shift = 5 px). Прямокутник малюється у нативних px зображення.</small></p>
+
+<h3>regions.json</h3>
+<textarea id="out" readonly></textarea>
+
+<script>
+const tags = Array.from(document.querySelectorAll('.tag'));
+const cvs = document.getElementById('cvs');
+const ctx = cvs.getContext('2d');
+const out = document.getElementById('out');
+const info = document.getElementById('info');
+let img = new Image();
+let imgLoaded = false;
+
+const regions = {
+  id:null,name:null,power:null,dead:null,t5:null,t4:null,t3:null,t2:null,t1:null
+};
+let currentKey = 'name';
+function setActive(k){
+  currentKey = k;
+  tags.forEach(t=>t.classList.toggle('active', t.dataset.k===k));
+}
+tags.forEach(t=>t.addEventListener('click',()=>setActive(t.dataset.k)));
+setActive('name');
+
+function updateTextarea(){
+  const clean = {};
+  for(const [k, r] of Object.entries(regions)){
+    if(r){
+      clean[k] = { left:Math.round(r.left), top:Math.round(r.top),
+                   width:Math.round(r.width), height:Math.round(r.height) };
+    }
+  }
+  out.value = JSON.stringify(clean, null, 2);
+}
+
+function draw(){
+  if(!imgLoaded) return;
+  ctx.clearRect(0,0,cvs.width,cvs.height);
+  ctx.drawImage(img, 0, 0);
+  // overlay rectangles
+  for(const [k,r] of Object.entries(regions)){
+    if(!r) continue;
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = (k===currentKey) ? '#3366ff' : '#00aa88';
+    ctx.strokeRect(r.left, r.top, r.width, r.height);
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.fillRect(r.left, r.top-18, ctx.measureText(k).width+10, 16);
+    ctx.fillStyle = '#fff';
+    ctx.fillText(k, r.left+4, r.top-6);
+  }
+}
+
+let dragging = false, start = null;
+function getScale(){
+  const rect = cvs.getBoundingClientRect();
+  return { sx: cvs.width / rect.width, sy: cvs.height / rect.height, rect };
+}
+cvs.addEventListener('mousedown', (e)=>{
+  if(!imgLoaded) return;
+  const {sx, sy, rect} = getScale();
+  const x = (e.clientX - rect.left) * sx;
+  const y = (e.clientY - rect.top) * sy;
+  dragging = true;
+  start = {x,y};
+  regions[currentKey] = { left:x, top:y, width:0, height:0 };
+});
+cvs.addEventListener('mousemove', (e)=>{
+  if(!dragging) return;
+  const {sx, sy, rect} = getScale();
+  const x = (e.clientX - rect.left) * sx;
+  const y = (e.clientY - rect.top) * sy;
+  const r = regions[currentKey];
+  r.left = Math.min(start.x, x);
+  r.top = Math.min(start.y, y);
+  r.width = Math.abs(x - start.x);
+  r.height = Math.abs(y - start.y);
+  draw(); updateTextarea();
+});
+window.addEventListener('mouseup', ()=>{ dragging=false; });
+
+window.addEventListener('keydown',(e)=>{
+  const r = regions[currentKey];
+  if(e.key>='1' && e.key<='8'){
+    const map = ['id','name','power','dead','t5','t4','t3','t2','t1'];
+    setActive(map[+e.key-1]);
+  }
+  if(!r) return;
+  const step = e.shiftKey ? 5 : 1;
+  if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)){
+    e.preventDefault();
+    if(e.key==='ArrowLeft') r.left -= step;
+    if(e.key==='ArrowRight') r.left += step;
+    if(e.key==='ArrowUp') r.top -= step;
+    if(e.key==='ArrowDown') r.top += step;
+    draw(); updateTextarea();
+  }
+});
+
+document.getElementById('file').addEventListener('change', e=>{
+  const f = e.target.files[0];
+  if(!f) return;
+  const url = URL.createObjectURL(f);
+  img.onload = ()=>{
+    cvs.width = img.naturalWidth;
+    cvs.height = img.naturalHeight;
+    imgLoaded = true;
+    info.textContent = `Image: ${cvs.width}×${cvs.height}`;
+    ctx.font = '12px system-ui';
+    draw();
+  };
+  img.src = url;
+});
+
+document.getElementById('copyJson').addEventListener('click', async ()=>{
+  await navigator.clipboard.writeText(out.value||'{}');
+  alert('JSON copied');
+});
+
+document.getElementById('loadJson').addEventListener('click', async ()=>{
+  const text = prompt('Paste regions.json here:');
+  if(!text) return;
+  try{
+    const obj = JSON.parse(text);
+    for(const k of Object.keys(regions)) regions[k] = obj[k] || null;
+    draw(); updateTextarea();
+  }catch(e){ alert('Invalid JSON'); }
+});
+</script>
+</body>
+</html>
