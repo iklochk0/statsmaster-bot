@@ -4,9 +4,11 @@
       "name": "top",
       "rois": {
         "id":    { "left": 575, "top": 144, "width": 87,  "height": 30 },
-        "name":  { "left": 474, "top": 168, "width": 79,  "height": 41 },
         "power": { "left": 684, "top": 255, "width": 185, "height": 38 },
         "kp":    { "left": 900, "top": 255, "width": 185, "height": 38 }
+      },
+      "actions": {
+        "copyName": { "type": "tap", "x": 600, "y": 190, "durMs": 120 }
       },
       "nav": { "type": "tap", "x": 940, "y": 245, "durMs": 400 }
     },

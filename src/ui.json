@@ -1,0 +1,27 @@
+{
+  "screen": {
+    "safe": { "left": 0, "top": 0, "width": 1280, "height": 720 }
+  },
+  "flow": {
+    "openMyProfile": { "type": "tap", "x": 50, "y": 50,  "durMs": 120 },
+    "openRankings":  { "type": "tap", "x": 300, "y": 600, "durMs": 120 },
+    "openCityHall":  { "type": "tap", "x": 1000, "y": 400, "durMs": 120 },
+    "closeDeath":    { "type": "tap", "x": 1113, "y": 36,  "durMs": 500 },
+    "closeProfile":  { "type": "tap", "x": 1155, "y": 75,  "durMs": 500 },
+    "settleMs": 700
+  },
+  "cityHallList": {
+    "rows": [
+      { "x": 640, "y": 196 },
+      { "x": 640, "y": 275 },
+      { "x": 640, "y": 356 },
+      { "x": 640, "y": 436 }
+    ],
+    "levelCol": {
+      "left": 980,
+      "width": 65,
+      "height": 45,
+      "top0": 210
+    }
+  }
+}
