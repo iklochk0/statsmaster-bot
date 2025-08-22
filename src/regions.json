@@ -8,7 +8,7 @@
         "kp":    { "left": 900, "top": 255, "width": 185, "height": 38 }
       },
       "actions": {
-        "copyName": { "type": "tap", "x": 600, "y": 190, "durMs": 120 }
+        "copyName": { "type": "tap", "x": 500, "y": 185, "durMs": 300 }
       },
       "nav": { "type": "tap", "x": 940, "y": 245, "durMs": 400 }
     },

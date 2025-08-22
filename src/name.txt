@@ -1,0 +1,1 @@
+"name":    { "left": 475, "top": 165, "width": 270,  "height": 50 }
