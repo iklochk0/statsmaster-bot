@@ -5,9 +5,10 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
     "scan": "node ./src/index.js",
-    "bot": "node ./src/bot.js"
+    "bot": "node ./src/bot.js",
+    "server": "node ./src/server.js",
+    "migrate:add-dkp": "node ./src/migrate.add_dkp.js"
   },
   "keywords": [],
   "author": "",
@@ -18,6 +19,7 @@
     "discord.js": "^14.21.0",
     "dotenv": "^17.2.1",
     "execa": "^9.6.0",
+    "express": "^5.1.0",
     "pg": "^8.16.3",
     "sharp": "^0.34.3",
     "tesseract.js": "^6.0.1"

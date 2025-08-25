@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8" />
+  <title>KvK Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { --bg:#0b0f14; --card:#111823; --muted:#7c8aa0; --fg:#e7eefb; --acc:#4ea1ff; }
+    html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);font-family:system-ui,Segoe UI,Arial,sans-serif;}
+    header{padding:16px 20px;border-bottom:1px solid #1a2330;background:linear-gradient(180deg,#0e131a,#0b0f14);}
+    h1{margin:0;font-size:20px;letter-spacing:.3px}
+    .wrap{padding:20px;display:grid;gap:16px;grid-template-columns:1fr}
+    .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+    .card{background:var(--card);border:1px solid #1b2635;border-radius:14px;padding:14px}
+    .card h2{margin:0 0 10px 0;font-size:16px}
+    input,button,select{background:#0c131d;border:1px solid #273248;color:var(--fg);padding:8px 10px;border-radius:10px}
+    button{cursor:pointer}
+    table{width:100%;border-collapse:collapse;font-size:14px}
+    th,td{padding:8px 10px;border-bottom:1px solid #1c2635;white-space:nowrap}
+    th{color:var(--muted);text-align:left;cursor:pointer;user-select:none}
+    tr:hover{background:#0f1723}
+    small{color:var(--muted)}
+    .pill{display:inline-block;padding:2px 8px;border-radius:999px;background:#132033;border:1px solid #253650}
+    .split{display:grid;gap:16px;grid-template-columns:1fr}
+    @media(min-width:1100px){ .split{grid-template-columns:1.2fr .8fr} }
+  </style>
+</head>
+<body>
+<header>
+  <h1>KvK Dashboard <small id="kvkActive"></small></h1>
+</header>
+
+<div class="wrap split">
+  <!-- LEFT -->
+  <section class="card">
+    <h2>Latest scans</h2>
+    <div class="row">
+      <label>Search: <input id="search" placeholder="name / id" /></label>
+      <label>Limit:
+        <select id="limit">
+          <option>50</option><option>100</option><option selected>200</option><option>500</option>
+        </select>
+      </label>
+      <button id="btnReloadLatest">Reload</button>
+    </div>
+    <div style="overflow:auto;margin-top:8px">
+      <table id="tblLatest">
+        <thead>
+          <tr>
+            <th data-k="player_id">ID</th>
+            <th data-k="name">Name</th>
+            <th data-k="updated_at">Updated</th>
+            <th data-k="power">Power</th>
+            <th data-k="kp">KP</th>
+            <th data-k="dead">Dead</th>
+            <th data-k="t1">T1</th>
+            <th data-k="t2">T2</th>
+            <th data-k="t3">T3</th>
+            <th data-k="t4">T4</th>
+            <th data-k="t5">T5</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- RIGHT -->
+  <section class="card">
+    <h2>KvK Controls</h2>
+    <div class="row">
+      <button id="btnStartKvK">Start KvK</button>
+      <span class="pill">Active: <span id="kvkIdPill">—</span></span>
+    </div>
+    <div class="row">
+      <label>kp_weight <input id="kpWeight" type="number" step="0.1" value="1.0" style="width:90px"></label>
+      <label>dead_to_kp <input id="deadWeight" type="number" step="0.1" value="5.0" style="width:90px"></label>
+      <button id="btnSetWeights">Apply</button>
+    </div>
+    <div class="row">
+      <label>Ensure goal for Player ID: <input id="ensurePid" type="text" placeholder="51034274" style="width:140px"></label>
+      <button id="btnEnsure">Ensure</button>
+    </div>
+
+    <h2 style="margin-top:14px">KvK Top by %</h2>
+    <div class="row">
+      <label>Limit:
+        <select id="limitTop">
+          <option>10</option><option selected>20</option><option>50</option>
+        </select>
+      </label>
+      <button id="btnReloadTop">Reload</button>
+    </div>
+    <div style="overflow:auto;margin-top:8px">
+      <table id="tblTop">
+        <thead>
+          <tr>
+            <th data-k="player_id">ID</th>
+            <th data-k="name">Name</th>
+            <th data-k="dkp">DKP</th>
+            <th data-k="d_kp">ΔKP</th>
+            <th data-k="d_dead">ΔDead</th>
+            <th data-k="goal_dkp">Goal DKP</th>
+            <th data-k="pct">% to goal</th>
+            <th data-k="updated_at">Updated</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+</div>
+
+<script>
+const fmtN = v => {
+  if (v === null || v === undefined) return "";
+  const n = Number(v);
+  if (Number.isFinite(n)) return n.toLocaleString("en-US");
+  return String(v);
+};
+const fmtTs = s => s ? new Date(s).toLocaleString() : "";
+
+async function jget(u){ const r = await fetch(u); return r.json(); }
+async function jpost(u, body){ const r = await fetch(u,{method:"POST",headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})}); return r.json(); }
+
+function renderTable(tbody, rows, cols){
+  tbody.innerHTML = rows.map(r => {
+    const tds = cols.map(c => `<td>${c.f ? c.f(r[c.k], r) : (r[c.k] ?? "")}</td>`).join("");
+    return `<tr>${tds}</tr>`;
+  }).join("");
+}
+
+async function loadActive(){
+  const a = await jget("/api/kvk/active");
+  document.getElementById("kvkActive").textContent = a.kvk_id ? `Active KvK: ${a.kvk_id}` : "No active KvK";
+  document.getElementById("kvkIdPill").textContent = a.kvk_id ?? "—";
+}
+
+async function loadLatest(){
+  const limit = document.getElementById("limit").value;
+  const search = document.getElementById("search").value.trim();
+  const q = new URLSearchParams({ limit, ...(search?{search}: {}) }).toString();
+  const data = await jget(`/api/latest?${q}`);
+  const cols = [
+    {k:"player_id"}, {k:"name"}, {k:"updated_at", f:fmtTs},
+    {k:"power", f:fmtN}, {k:"kp", f:fmtN}, {k:"dead", f:fmtN},
+    {k:"t1", f:fmtN}, {k:"t2", f:fmtN}, {k:"t3", f:fmtN}, {k:"t4", f:fmtN}, {k:"t5", f:fmtN},
+  ];
+  renderTable(document.querySelector("#tblLatest tbody"), data.rows || [], cols);
+}
+
+async function loadTop(){
+  const limit = document.getElementById("limitTop").value;
+  const data = await jget(`/api/progress?limit=${encodeURIComponent(limit)}`);
+  const cols = [
+    {k:"player_id"}, {k:"name"},
+    {k:"dkp", f:fmtN}, {k:"d_kp", f:fmtN}, {k:"d_dead", f:fmtN},
+    {k:"goal_dkp", f:fmtN}, {k:"pct", f:(v)=> v===null||v===undefined? "" : `${v}%`},
+    {k:"updated_at", f:fmtTs},
+  ];
+  renderTable(document.querySelector("#tblTop tbody"), data.rows || [], cols);
+}
+
+document.getElementById("btnReloadLatest").onclick = loadLatest;
+document.getElementById("btnReloadTop").onclick = loadTop;
+
+document.getElementById("btnStartKvK").onclick = async () => {
+  const name = prompt("KvK name (optional):", "");
+  const r = await jpost("/api/kvk/start", { name: (name||"").trim() || null });
+  alert(r.ok ? `Started KvK ${r.kvk_id}` : `Error: ${r.error}`);
+  await loadActive(); await loadTop();
+};
+
+document.getElementById("btnSetWeights").onclick = async () => {
+  const kp = Number(document.getElementById("kpWeight").value);
+  const dead = Number(document.getElementById("deadWeight").value);
+  const r = await jpost("/api/kvk/weight", { kp_weight: kp, dead_to_kp: dead });
+  alert(r.ok ? "Weights updated" : `Error: ${r.error}`);
+  await loadTop();
+};
+
+document.getElementById("btnEnsure").onclick = async () => {
+  const id = document.getElementById("ensurePid").value.trim();
+  if (!id) return;
+  const r = await jpost("/api/kvk/ensure", { player_id: id });
+  alert(r.ok ? (r.ensured ? "Goal created/updated" : "Already had goal / no active KvK") : `Error: ${r.error}`);
+  await loadTop();
+};
+
+document.addEventListener("DOMContentLoaded", async () => {
+  await loadActive();
+  await loadLatest();
+  await loadTop();
+});
+</script>
+</body>
+</html>
