@@ -349,16 +349,16 @@ function kvkTopSVG(rows, meta = {}) {
 
   const marginX = 40;
   const listLeft = marginX + 12;                       // номер + ім’я
-  const barLeft  = 200;                                // старт X смужок
-  const barWidth = W - barLeft - 80;                   // ширина смужок
+  const barLeft  = 220;                                // старт X смужок
+  const barWidth = W - barLeft - 85;                   // ширина смужок
   const padRight = 46;                                 // відступ справа, щоб % не накладався
-  const hBar = 14;                                     // тонша смужка
+  const hBar = 15;                                     // тонша смужка
   const rxy  = 7;
   const rowGap = 56;                                   // вертикальний крок між рядками
   const yStart = 120;
 
   const title = meta.title ?? `KvK Top ${rows.length}`;
-  const sublineL = `Active: ${meta.active ?? "?"}`;
+  //const sublineL = `Active: ${meta.active ?? "?"}`;
   const sublineR = `Updated: ${meta.updated ?? "-"}`;
 
   let lines = "";
@@ -374,16 +374,16 @@ function kvkTopSVG(rows, meta = {}) {
 
     lines += `
       <g>
-        <text x="${listLeft - 8}" y="${y - 2}" class="s">${rank}</text>
-        <text x="${listLeft + 30}" y="${y - 2}" class="t">${name}</text>
+        <text x="${listLeft - 8}" y="${y + 15}" class="s">${rank}</text>
+        <text x="${listLeft + 30}" y="${y + 15}" class="t">${name}</text>
 
-        <rect x="${barLeft}" y="${y - hBar}" width="${barWidth}" height="${hBar}" rx="${rxy}" fill="${track}"/>
-        <rect x="${barLeft}" y="${y - hBar}" width="${barLen}" height="${hBar}" rx="${rxy}" fill="${color1}"/>
+        <rect x="${barLeft}" y="${y}" width="${barWidth}" height="${hBar}" rx="${rxy}" fill="${track}"/>
+        <rect x="${barLeft}" y="${y}" width="${barLen}" height="${hBar}" rx="${rxy}" fill="${color1}"/>
 
         <!-- DKP лічильник під смужкою -->
-        <text x="${barLeft}" y="${y + 16}" class="m">${dkpText}</text>
+        <text x="${barLeft}" y="${y + 31}" class="m">${dkpText}</text>
         <!-- % справа від смужки, з відступом -->
-        <text x="${barLeft + barWidth - padRight/2}" y="${y + 16}" text-anchor="end" class="m">${pct1(pct)}%</text>
+        <text x="${barLeft + barWidth - padRight/2}" y="${y + 31}" text-anchor="end" class="m">${pct1(pct)}%</text>
       </g>`;
   });
 
@@ -403,7 +403,6 @@ function kvkTopSVG(rows, meta = {}) {
     <rect x="20" y="20" width="${W-40}" height="${H-40}" rx="22" fill="${card}" stroke="${grid}" stroke-width="1"/>
 
     <text x="${marginX}" y="70" class="b">${title}</text>
-    <text x="${marginX}" y="98" class="s">${sublineL}</text>
     <text x="${W - marginX}" y="98" class="s" text-anchor="end">${sublineR}</text>
 
     ${lines}
