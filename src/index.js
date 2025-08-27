@@ -1,5 +1,5 @@
-// src/index.js — CH25 scanner: humanized timing + ghost-skip (5→6→7→back→5)
-// + robust back + clipboard name + JSON backups
+// src/index.js — CH25 scanner: ordered warmup (1→4) then ghost-skip base (5→6→7→back→5)
+// + humanized timing + robust back + clipboard name + JSON backups
 
 import "dotenv/config";
 import fs from "fs/promises";
@@ -51,14 +51,12 @@ const T_CLIP_ADB  = 2500;
 const T_CLIP_HOST = 3000;
 const T_LONGPRESS = 360;
 
-// додаткові паузи між профілями (env)
 const SCAN_PAUSE_MIN_MS = Number(process.env.SCAN_PAUSE_MIN_MS || 900);
 const SCAN_PAUSE_MAX_MS = Number(process.env.SCAN_PAUSE_MAX_MS || 1800);
 
-// рандомне зміщення координат тапу ±RAND_PX (env)
 const RAND_PX = Number(process.env.RAND_PX || 3);
 
-// 0-based індекс базового рядка (5-та позиція): 4 == 5th
+// 0-based: 4 означає 5-та позиція
 const BASE_ROW_IDX = Number(process.env.BASE_ROW_IDX ?? 4);
 
 const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
@@ -397,11 +395,23 @@ async function main() {
 
   let visited = 0;
 
-  while (visited < COUNT) {
-    // головний крок: пробуємо 5 → 6 → 7
-    const { opened, usedIndex } = await openProfileWithFallbacks(BASE_ROW_IDX);
+  /* ---- ФАЗА 1: Прохід 1→4 (індекси 0..BASE_ROW_IDX-1) у строгому порядку ---- */
+  for (let i = 0; i < Math.min(BASE_ROW_IDX, LIST.rows.length) && visited < COUNT; i++) {
+    // якщо це не останній видимий рядок — перевіримо CH рівень і, якщо не 25, скіпнемо
+    if (i < LIST.rows.length - 1) {
+      const lvl = await readLevelAtRow(i);
+      if (lvl !== 25) {
+        console.log(`   Skip row ${i}: CH=${Number.isNaN(lvl) ? "?" : lvl}`);
+        await sleep(200 + T_JITTER());
+        visited++;
+        await humanPause();
+        continue;
+      }
+    }
+
+    const opened = await openProfileFromRow(i, 3);
     if (!opened) {
-      console.warn("   ! Ghost chain (5/6/7) — skip this slot");
+      console.warn(`   ! Row ${i} did not open — skip`);
       visited++;
       await humanPause();
       continue;
@@ -416,26 +426,47 @@ async function main() {
       console.log(`   Save ${pid} "${stats.name || ""}"`);
       await upsertPlayer({ id: pid, name: stats.name || "" });
       await insertStats(run_id, pid, stats);
-
-      try {
-        const res = await kvkEnsureGoal(pid);
-        if (res) console.log(`   KvK goal ensured for ${pid}: goal_kp=${res.goal_kp}, goal_dead=${res.goal_dead}`);
-      } catch (e) {
-        console.warn(`   ! kvkEnsureGoal(${pid}) failed: ${e?.message || e}`);
-      }
-
+      try { const res = await kvkEnsureGoal(pid); if (res) console.log(`   KvK goal ensured for ${pid}`); } catch {}
       await appendBackup(backupAllPath, stamp);
       await appendBackup(backupRunPath, stamp);
     } else {
       console.warn("   ! No reliable player id recognized, skipped");
     }
 
-    // повертаємося у список
     const ok = await backToCityHallList();
-    if (!ok) {
-      console.warn("   ! Не вдалося повернутися до City Hall списку — стоп");
-      break;
+    if (!ok) { console.warn("   ! Can't return to list — stop"); break; }
+
+    visited++;
+    await humanPause();
+  }
+
+  /* ---- ФАЗА 2: Базовий цикл із 5-ю позицією та резервами 6→7 ---- */
+  while (visited < COUNT) {
+    const { opened, usedIndex } = await openProfileWithFallbacks(BASE_ROW_IDX);
+    if (!opened) {
+      console.warn("   ! Ghost chain (5/6/7) — skip this slot");
+      visited++;
+      await humanPause();
+      continue;
     }
+
+    const stats = await scanProfileOnce();
+    const stamp = { run_id, at: new Date().toISOString(), stats };
+
+    const pid = Number(String(stats?.id || "").replace(/\D/g, ""));
+    if (Number.isFinite(pid) && String(pid).length >= 5) {
+      console.log(`   Save ${pid} "${stats.name || ""}"`);
+      await upsertPlayer({ id: pid, name: stats.name || "" });
+      await insertStats(run_id, pid, stats);
+      try { const res = await kvkEnsureGoal(pid); if (res) console.log(`   KvK goal ensured for ${pid}`); } catch {}
+      await appendBackup(backupAllPath, stamp);
+      await appendBackup(backupRunPath, stamp);
+    } else {
+      console.warn("   ! No reliable player id recognized, skipped");
+    }
+
+    const ok = await backToCityHallList();
+    if (!ok) { console.warn("   ! Can't return to list — stop"); break; }
 
     visited++;
     await humanPause();
