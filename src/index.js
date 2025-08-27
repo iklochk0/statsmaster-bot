@@ -1,4 +1,6 @@
-// src/index.js — CH25 scanner: humanized timing + random tap jitter + robust back + clipboard name + JSON backups
+// src/index.js — CH25 scanner: humanized timing + ghost-skip (5→6→7→back→5)
+// + robust back + clipboard name + JSON backups
+
 import "dotenv/config";
 import fs from "fs/promises";
 import path from "path";
@@ -41,25 +43,24 @@ const USE_HOST_CLIPBOARD = process.env.USE_HOST_CLIPBOARD !== "false"; // defaul
 const ANCHOR_CITYHALL = UI.anchors?.cityHall ?? { left: 520, top: 110, width: 260, height: 60 };
 
 /* ===================== Tunables (timings & humanization) ===================== */
-// базовий settle з ui.json
 const T_SETTLE = Number(FLOW.settleMs ?? 700);
-// випадкові дрібні паузи
 const T_JITTER   = () => 150 + Math.floor(Math.random() * 250);
-// ім’я/кліпборд
 const T_OCR_NAME_GUESS = 220;
 const T_CLIP_STEP = 180;
 const T_CLIP_ADB  = 2500;
 const T_CLIP_HOST = 3000;
 const T_LONGPRESS = 360;
 
-// додаткові “людські” паузи між профілями (env)
+// додаткові паузи між профілями (env)
 const SCAN_PAUSE_MIN_MS = Number(process.env.SCAN_PAUSE_MIN_MS || 900);
 const SCAN_PAUSE_MAX_MS = Number(process.env.SCAN_PAUSE_MAX_MS || 1800);
 
 // рандомне зміщення координат тапу ±RAND_PX (env)
 const RAND_PX = Number(process.env.RAND_PX || 3);
 
-// маленький хелпер для рандомних чисел у діапазоні
+// 0-based індекс базового рядка (5-та позиція): 4 == 5th
+const BASE_ROW_IDX = Number(process.env.BASE_ROW_IDX ?? 4);
+
 const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
 const humanPause = async () => { await sleep(randInt(SCAN_PAUSE_MIN_MS, SCAN_PAUSE_MAX_MS)); };
 const jitterPx = (v) => v + randInt(-RAND_PX, RAND_PX);
@@ -71,10 +72,8 @@ function arg(name, def) {
   return a ? a.split("=", 2)[1] : def;
 }
 const COUNT = Number(arg("count", "40"));
-const START = Number(arg("start", "0")) % LIST.rows.length;
 
 /* ===================== Humanized navigate wrapper ===================== */
-// Обгортає navigate(): якщо дія tap — підкручує x/y та durMs; якщо масив дій — мапить.
 async function navigateHuman(actionOrArray) {
   const massage = (a) => {
     if (!a || typeof a !== "object") return a;
@@ -141,7 +140,7 @@ async function ocrField(key, buf) {
   return txt;
 }
 
-/* ===================== Geometry ===================== */
+/* ===================== Geometry (CH level col) ===================== */
 function levelRectForRow(i) {
   const col = LIST.levelCol;
   const rows = LIST.rows;
@@ -162,9 +161,7 @@ function levelRectForRow(i) {
 }
 
 async function readLevelAtRow(i) {
-  // дрібна пауза перед знімком, щоб не бути надто “ідеальними”
   await sleep(50 + randInt(0, 90));
-
   const rect = levelRectForRow(i);
   await captureScreen(SCREEN_PATH);
   const key = `lv_r${i}`;
@@ -178,12 +175,63 @@ async function readLevelAtRow(i) {
   return Number.isFinite(n) ? n : NaN;
 }
 
+/* ===================== Profile detection ===================== */
 function regionNameCenter() {
   const r = CFG?.pages?.[0]?.rois?.name;
   if (!r) return null;
   return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
 }
 function actionCopyFromRegions() { return CFG?.pages?.[0]?.actions?.copyName || null; }
+
+async function isProfileScreen() {
+  await captureScreen(SCREEN_PATH);
+  const top = CFG.pages[0];
+  const rois = await cropRegions(SCREEN_PATH, top.rois, path.join(ROOT_DIR, "screenshots", "probe_profile"));
+
+  const idRaw = rois.id ? (await ocrBuffer(rois.id, DIGITS)).trim() : "";
+  const idDigits = (idRaw || "").replace(/\D/g, "");
+  if (idDigits.length >= 5) return true;
+
+  const powRaw = rois.power ? (await ocrBuffer(rois.power, DIGITS)).trim() : "";
+  const kpRaw  = rois.kp    ? (await ocrBuffer(rois.kp,    DIGITS)).trim() : "";
+  const pow = Number((powRaw || "").replace(/\D/g, ""));
+  const kp  = Number((kpRaw  || "").replace(/\D/g, ""));
+  return (Number.isFinite(pow) && pow > 1000) || (Number.isFinite(kp) && kp > 1000);
+}
+
+async function waitProfileOrGiveUp(timeoutMs = 3200, pollMs = 250) {
+  const end = Date.now() + timeoutMs;
+  await sleep(120);
+  while (Date.now() < end) {
+    if (await isProfileScreen()) return true;
+    if (await isCityHallList()) { await sleep(pollMs); continue; }
+    await sleep(pollMs);
+  }
+  return false;
+}
+
+/* Тап по конкретному рядку з кількома спробами */
+async function openProfileFromRow(idx, retries = 2) {
+  const row = LIST.rows[idx];
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    console.log(` → Tap row ${idx} (attempt ${attempt}/${retries})`);
+    await navigateHuman({ type: "tap", x: row.x, y: row.y, durMs: 120 });
+    await sleep(T_SETTLE + T_JITTER());
+    if (await waitProfileOrGiveUp(3200, 250)) return true;
+    await sleep(200 + randInt(0, 200));
+  }
+  return false;
+}
+
+/* Спробувати 5 → 6 → 7; повертає {opened, usedIndex} */
+async function openProfileWithFallbacks(baseIdx = BASE_ROW_IDX) {
+  const candidates = [baseIdx, baseIdx + 1, baseIdx + 2].filter(i => i < LIST.rows.length);
+  for (const i of candidates) {
+    const ok = await openProfileFromRow(i, i === baseIdx ? 3 : 2);
+    if (ok) return { opened: true, usedIndex: i };
+  }
+  return { opened: false, usedIndex: -1 };
+}
 
 /* ===================== Clipboard name capture ===================== */
 async function copyNameIntoTexts(texts) {
@@ -210,7 +258,6 @@ async function copyNameIntoTexts(texts) {
 
   if (!clip && p) {
     try {
-      // Long-press через swipe — теж трохи “нерівний”
       await execa(ADB, adbArgs([
         "shell","input","swipe",
         String(jitterPx(p.x)), String(jitterPx(p.y)),
@@ -228,7 +275,7 @@ async function copyNameIntoTexts(texts) {
 
   if (clip) {
     console.log(`   Clipboard name: "${clip}"`);
-    texts.name = clip; // НЕ перетираємо OCR'ом далі
+    texts.name = clip;
   } else {
     console.log("   Clipboard name: <empty>");
   }
@@ -237,14 +284,9 @@ async function copyNameIntoTexts(texts) {
 /* ===================== Profile scan ===================== */
 async function scanProfileOnce() {
   const texts = {};
-
-  // 1) копія імені ДО OCR
   await copyNameIntoTexts(texts);
-
-  // невелика людська пауза
   await sleep(120 + randInt(0, 150));
 
-  // 2) OCR сторінок
   for (const page of CFG.pages) {
     await captureScreen(SCREEN_PATH);
     const rois = await cropRegions(SCREEN_PATH, page.rois, path.join(ROOT_DIR, "screenshots", `regions_${page.name}`));
@@ -254,12 +296,11 @@ async function scanProfileOnce() {
           const guess = await ocrField(k, buf);
           if (guess) texts.name = guess;
         } else {
-          await ocrField(k, buf); // лише для логів
+          await ocrField(k, buf);
         }
       } else {
         texts[k] = await ocrField(k, buf);
       }
-      // маленька варіативність між ROI
       await sleep(randInt(20, 60));
     }
     if (page.nav) {
@@ -268,7 +309,6 @@ async function scanProfileOnce() {
     }
   }
 
-  // 3) якщо id слабкий — ще одна спроба з top
   const idDigits = (texts.id || "").replace(/\D/g, "");
   if (!idDigits || idDigits.length < 5) {
     const first = CFG.pages[0];
@@ -280,7 +320,7 @@ async function scanProfileOnce() {
   return parseStats(texts);
 }
 
-/* ===================== Navigation ===================== */
+/* ===================== Navigation (open/back/list checks) ===================== */
 async function openCityHallList() {
   await navigateHuman(FLOW.openMyProfile); await sleep(T_SETTLE + randInt(0, 120));
   await navigateHuman(FLOW.openRankings);  await sleep(T_SETTLE + randInt(0, 120));
@@ -353,30 +393,21 @@ async function main() {
   await fs.writeFile(backupRunPath, "[]").catch(() => {});
 
   await openCityHallList();
-  await humanPause(); // перша “людська” пауза
+  await humanPause();
 
   let visited = 0;
-  let idx = START;
-  const lastIdx = LIST.rows.length - 1;
 
   while (visited < COUNT) {
-    const row = LIST.rows[idx];
-
-    if (idx < lastIdx) {
-      const lvl = await readLevelAtRow(idx);
-      if (lvl !== 25) {
-        console.log(`   Skip row ${idx}: CH=${Number.isNaN(lvl) ? "?" : lvl}`);
-        await sleep(200 + T_JITTER());
-        visited++;
-        idx = Math.min(lastIdx, idx + 1);
-        continue;
-      }
+    // головний крок: пробуємо 5 → 6 → 7
+    const { opened, usedIndex } = await openProfileWithFallbacks(BASE_ROW_IDX);
+    if (!opened) {
+      console.warn("   ! Ghost chain (5/6/7) — skip this slot");
+      visited++;
+      await humanPause();
+      continue;
     }
 
-    console.log(` → Tap row ${idx}${idx === lastIdx ? " (forced last row)" : " (CH25)"}`);
-    await navigateHuman({ type: "tap", x: row.x, y: row.y, durMs: 120 });
-    await sleep(T_SETTLE + T_JITTER());
-
+    // профіль відкрито — скануємо
     const stats = await scanProfileOnce();
     const stamp = { run_id, at: new Date().toISOString(), stats };
 
@@ -388,11 +419,7 @@ async function main() {
 
       try {
         const res = await kvkEnsureGoal(pid);
-        if (res) {
-          console.log(`   KvK goal ensured for ${pid}: goal_kp=${res.goal_kp}, goal_dead=${res.goal_dead}`);
-        } else {
-          console.log(`   KvK goal exists or no active KvK/latest for ${pid}`);
-        }
+        if (res) console.log(`   KvK goal ensured for ${pid}: goal_kp=${res.goal_kp}, goal_dead=${res.goal_dead}`);
       } catch (e) {
         console.warn(`   ! kvkEnsureGoal(${pid}) failed: ${e?.message || e}`);
       }
@@ -403,6 +430,7 @@ async function main() {
       console.warn("   ! No reliable player id recognized, skipped");
     }
 
+    // повертаємося у список
     const ok = await backToCityHallList();
     if (!ok) {
       console.warn("   ! Не вдалося повернутися до City Hall списку — стоп");
@@ -410,11 +438,11 @@ async function main() {
     }
 
     visited++;
-
-    // додаткова людська пауза між профілями
     await humanPause();
 
-    idx = Math.min(lastIdx, idx + 1);
+    if (usedIndex !== BASE_ROW_IDX) {
+      console.log(`   Used fallback row ${usedIndex} → next loop presses base 5 again`);
+    }
   }
 
   console.log(`\n✓ Done: visited ${visited} rows\nBackups:\n  - ${path.relative(ROOT_DIR, backupAllPath)}\n  - ${path.relative(ROOT_DIR, backupRunPath)}`);

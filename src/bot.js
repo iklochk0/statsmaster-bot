@@ -200,32 +200,61 @@ function stripeCardSVG(r, latest, deltas) {
   const panel = "#0f1218", card = "#121722", grid = "#1e2633", text = "#e6edf7", sub = "#a9b4c6";
   const track = "#2b3342", color1 = "#00c853", color2 = "#7c4dff";
 
-  // реальний % для цифри/тега; обрізаний — тільки для барів
+  // %: сирий (для цифри/тега) і обрізаний (для смуги)
   const pctDKP_raw = Number(r?.pct) || 0;
   const pctDKP     = clamp(pctDKP_raw, 0, 220);
-  const pctKP   = clamp(((Number(r?.d_kp)   || 0) / (Number(r?.goal_kp)   || 0)) * 100 || 0, 0, 220);
-  const pctDead = clamp(((Number(r?.d_dead) || 0) / (Number(r?.goal_dead) || 0)) * 100 || 0, 0, 220);
+  const pctKP      = clamp(((Number(r?.d_kp)   || 0) / (Number(r?.goal_kp)   || 0)) * 100 || 0, 0, 220);
+  const pctDead    = clamp(((Number(r?.d_dead) || 0) / (Number(r?.goal_dead) || 0)) * 100 || 0, 0, 220);
 
+  // LEFT
   const dkpLeft  = Math.max(0, Number(r?.goal_dkp || 0) - Number(r?.dkp || 0));
   const kpLeft   = Math.max(0, Number(r?.goal_kp  || 0) - Number(r?.d_kp || 0));
   const deadLeft = Math.max(0, Number(r?.goal_dead|| 0) - Number(r?.d_dead || 0));
 
-  const title = latest?.name ? `${latest.name} (${latest.player_id})` : String(latest?.player_id ?? "");
+  // заголовок
+  const title   = latest?.name ? `${latest.name} (${latest.player_id})` : String(latest?.player_id ?? "");
   const updated = latest?.updated_at ? new Date(latest.updated_at) : new Date();
 
+  // геометрія
   const x0 = 50, width = W - 100, hBar = 28, rxy = 14;
-  const yBase = 230, gap = 70;
-  const yKP = yBase, yDead = yBase + gap, yDKP = yBase + gap*2;
+  const yBase = 230;
 
-  const len = (pct) => ({
-    base: (width * Math.min(pct, 100)) / 100,
-    over: (width * Math.min(Math.max(0, pct - 100), 100)) / 100
-  });
-  const L_kp = len(pctKP), L_dead = len(pctDead), L_dkp = len(pctDKP);
+  // відступи та вирівнювачі
+  const GAP = 90;                          // вертикальна відстань між рядами
+  const BAR_LABEL_OFF = -12;               // підпис над смугою
+  const BAR_PCT_OFF   = Math.floor(hBar/2) + 7; // текст % усередині смуги
+  const BAR_NUMS_OFF  = hBar + 40;         // "cur / goal" під смугою
 
+  // утиліти для довжин і одного рядка
+  function segLengths(pct) {
+    return {
+      base: (width * Math.min(pct, 100)) / 100,
+      over: (width * Math.min(Math.max(0, pct - 100), 100)) / 100
+    };
+  }
+  function barRow({ label, pct, cur, goal, y }) {
+    const L = segLengths(pct);
+    return `
+      <text x="${x0}" y="${y + BAR_LABEL_OFF}" class="s">${label}</text>
+      <rect x="${x0}" y="${y}" width="${width}" height="${hBar}" rx="${rxy}" fill="${track}"/>
+      ${pct <= 100 ? `
+        <rect x="${x0}" y="${y}" width="${L.base}" height="${hBar}" rx="${rxy}" fill="${color1}"/>
+      ` : `
+        <rect x="${x0}" y="${y}" width="${width}" height="${hBar}" rx="${rxy}" fill="${color1}"/>
+        <rect x="${x0}" y="${y}" width="${L.over}"  height="${hBar}" rx="${rxy}" fill="${color2}"/>
+      `}
+      <text x="${x0 + width/2}" y="${y + BAR_PCT_OFF}" text-anchor="middle" class="m">${pct1(pct)}%</text>
+      <text x="${x0}" y="${y + 50}" class="m">${nf(cur)} / ${nf(goal)}</text>
+    `;
+  }
+
+  // дельти і кольори
   const { dPower=0, dKP=0, dDead=0, dT5=0, dT4=0 } = deltas || {};
-  const cPow  = colorDelta(dPower), cKPcol = colorDelta(dKP), cDeadCol = colorDelta(dDead);
-  const cT5   = colorDelta(dT5),    cT4    = colorDelta(dT4);
+  const cPow  = colorDelta(dPower);
+  const cKPcol = colorDelta(dKP);
+  const cDeadCol = colorDelta(dDead);
+  const cT5   = colorDelta(dT5);
+  const cT4   = colorDelta(dT4);
 
   return `
 <svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
@@ -278,48 +307,18 @@ function stripeCardSVG(r, latest, deltas) {
       <text y="46" class="m" style="fill:${cT4}">${fmtDelta(dT4)}</text>
     </g>
 
-    <!-- KP bar -->
-    <text x="${x0}" y="${yKP-8}" class="s">KP</text>
-    <rect x="${x0}" y="${yKP}" width="${width}" height="${hBar}" rx="${rxy}" fill="${track}"/>
-    ${pctKP <= 100 ? `
-      <rect x="${x0}" y="${yKP}" width="${L_kp.base}" height="${hBar}" rx="${rxy}" fill="${color1}"/>
-    ` : `
-      <rect x="${x0}" y="${yKP}" width="${width}" height="${hBar}" rx="${rxy}" fill="${color1}"/>
-      <rect x="${x0}" y="${yKP}" width="${L_kp.over}" height="${hBar}" rx="${rxy}" fill="${color2}"/>
-    `}
-    <text x="${x0 + width/2}" y="${yKP + hBar/2 + 6}" text-anchor="middle" class="m">${pct1(pctKP)}%</text>
+    <!-- ===== 3 stripes: KP / Dead / DKP ===== -->
+    ${barRow({ label: "KP",   pct: pctKP,   cur: r?.d_kp   || 0, goal: r?.goal_kp   || 0, y: yBase })}
+    ${barRow({ label: "Dead", pct: pctDead, cur: r?.d_dead || 0, goal: r?.goal_dead || 0, y: yBase + GAP })}
+    ${barRow({ label: "DKP",  pct: pctDKP,  cur: r?.dkp    || 0, goal: r?.goal_dkp  || 0, y: yBase + GAP*2 })}
 
-    <!-- Dead bar -->
-    <text x="${x0}" y="${yDead-8}" class="s">Dead</text>
-    <rect x="${x0}" y="${yDead}" width="${width}" height="${hBar}" rx="${rxy}" fill="${track}"/>
-    ${pctDead <= 100 ? `
-      <rect x="${x0}" y="${yDead}" width="${L_dead.base}" height="${hBar}" rx="${rxy}" fill="${color1}"/>
-    ` : `
-      <rect x="${x0}" y="${yDead}" width="${width}" height="${hBar}" rx="${rxy}" fill="${color1}"/>
-      <rect x="${x0}" y="${yDead}" width="${L_dead.over}" height="${hBar}" rx="${rxy}" fill="${color2}"/>
-    `}
-    <text x="${x0 + width/2}" y="${yDead + hBar/2 + 6}" text-anchor="middle" class="m">${pct1(pctDead)}%</text>
-
-    <!-- DKP bar -->
-    <text x="${x0}" y="${yDKP-8}" class="s">DKP</text>
-    <rect x="${x0}" y="${yDKP}" width="${width}" height="${hBar}" rx="${rxy}" fill="${track}"/>
-    ${pctDKP <= 100 ? `
-      <rect x="${x0}" y="${yDKP}" width="${L_dkp.base}" height="${hBar}" rx="${rxy}" fill="${color1}"/>
-    ` : `
-      <rect x="${x0}" y="${yDKP}" width="${width}" height="${hBar}" rx="${rxy}" fill="${color1}"/>
-      <rect x="${x0}" y="${yDKP}" width="${L_dkp.over}" height="${hBar}" rx="${rxy}" fill="${color2}"/>
-    `}
-    <text x="${x0 + width/2}" y="${yDKP + hBar/2 + 6}" text-anchor="middle" class="m">${pct1(pctDKP)}%</text>
-
-    <!-- DKP numbers & panels -->
-    <text x="${x0}" y="${yDKP + 48}" class="m">DKP ${nf(r?.dkp)} / ${nf(r?.goal_dkp)}</text>
-
-    <g transform="translate(${x0}, ${yDKP + 72})">
+    <!-- Панелі під DKP -->
+    <g transform="translate(${x0}, ${yBase + GAP*2 + BAR_NUMS_OFF + 24})">
       <rect x="-12" y="18" width="460" height="50" rx="10" fill="${track}"/>
       <text x="0" y="10" class="s">LEFT</text>
       <text x="0" y="48" class="m">KP ${nf(kpLeft)} • Dead ${nf(deadLeft)}</text>
     </g>
-    <g transform="translate(${x0+500}, ${yDKP + 72})">
+    <g transform="translate(${x0+500}, ${yBase + GAP*2 + BAR_NUMS_OFF + 24})">
       <rect x="-12" y="18" width="360" height="50" rx="10" fill="${track}"/>
       <text x="0" y="10" class="s">Δ FROM START</text>
       <text x="0" y="48" class="m">KP ${nf(r?.d_kp)} • Dead ${nf(r?.d_dead)}</text>
@@ -349,10 +348,10 @@ function kvkTopSVG(rows, meta = {}) {
 
   const marginX = 40;
   const listLeft = marginX + 12;                       // номер + ім’я
-  const barLeft  = 220;                                // старт X смужок
+  const barLeft  = 250;                                // старт X смужок
   const barWidth = W - barLeft - 85;                   // ширина смужок
   const padRight = 46;                                 // відступ справа, щоб % не накладався
-  const hBar = 15;                                     // тонша смужка
+  const hBar = 20;                                     // тонша смужка
   const rxy  = 7;
   const rowGap = 56;                                   // вертикальний крок між рядками
   const yStart = 120;
@@ -381,9 +380,9 @@ function kvkTopSVG(rows, meta = {}) {
         <rect x="${barLeft}" y="${y}" width="${barLen}" height="${hBar}" rx="${rxy}" fill="${color1}"/>
 
         <!-- DKP лічильник під смужкою -->
-        <text x="${barLeft}" y="${y + 31}" class="m">${dkpText}</text>
+        <text x="${barLeft}" y="${y + 35}" class="m">${dkpText}</text>
         <!-- % справа від смужки, з відступом -->
-        <text x="${barLeft + barWidth - padRight/2}" y="${y + 31}" text-anchor="end" class="m">${pct1(pct)}%</text>
+        <text x="${barLeft + barWidth - padRight/2}" y="${y + 35}" text-anchor="end" class="m">${pct1(pct)}%</text>
       </g>`;
   });
 
