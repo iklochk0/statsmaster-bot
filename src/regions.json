@@ -5,7 +5,7 @@
       "rois": {
         "id":    { "left": 575, "top": 144, "width": 87,  "height": 30 },
         "power": { "left": 684, "top": 255, "width": 185, "height": 38 },
-        "kp":    { "left": 900, "top": 255, "width": 185, "height": 38 }
+        "kp":    { "left": 900, "top": 255, "width": 195, "height": 38 }
       },
       "actions": {
         "copyName": { "type": "tap", "x": 500, "y": 185, "durMs": 300 }

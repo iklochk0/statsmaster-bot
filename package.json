@@ -8,7 +8,8 @@
     "scan": "node ./src/index.js",
     "bot": "node ./src/bot.js",
     "server": "node ./src/server.js",
-    "migrate:add-dkp": "node ./src/migrate.add_dkp.js"
+    "migrate:add-dkp": "node ./src/migrate.add_dkp.js",
+    "deletedb": "node src/wipe.all.js"
   },
   "keywords": [],
   "author": "",

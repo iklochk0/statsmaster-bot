@@ -1,4 +1,4 @@
-// src/index.js — CH25 scanner: robust back + clipboard name (ADB or host) + JSON backups
+// src/index.js — CH25 scanner: humanized timing + random tap jitter + robust back + clipboard name + JSON backups
 import "dotenv/config";
 import fs from "fs/promises";
 import path from "path";
@@ -11,7 +11,15 @@ import { cropRegions } from "./crop.js";
 import { initOCR, ocrBuffer, closeOCR } from "./ocr.js";
 import { parseStats } from "./parse.js";
 import { navigate, sleep } from "./emu.js";
-import { initSchema, beginRun, upsertPlayer, insertStats, closeDb } from "./db.pg.js";
+import {
+  initSchema,
+  beginRun,
+  upsertPlayer,
+  insertStats,
+  kvkEnsureGoal,
+  kvkActiveId,
+  closeDb
+} from "./db.pg.js";
 
 /* ===================== Paths & Config ===================== */
 const __filename = fileURLToPath(import.meta.url);
@@ -27,19 +35,35 @@ const LIST = UI.cityHallList;
 
 const SCREEN_PATH = process.env.SCREEN_PATH || path.join(ROOT_DIR, "screenshots", "screen.png");
 const ADB         = process.env.ADB_BIN || "adb";
-const SERIAL      = process.env.ADB_SERIAL || "";  // напр. 127.0.0.1:5555
+const SERIAL      = process.env.ADB_SERIAL || "";  // e.g. 127.0.0.1:5555
 const USE_HOST_CLIPBOARD = process.env.USE_HOST_CLIPBOARD !== "false"; // default true
 
 const ANCHOR_CITYHALL = UI.anchors?.cityHall ?? { left: 520, top: 110, width: 260, height: 60 };
 
-/* ===================== Tunables (timings) ===================== */
-const T_SETTLE   = Number(FLOW.settleMs ?? 700);
+/* ===================== Tunables (timings & humanization) ===================== */
+// базовий settle з ui.json
+const T_SETTLE = Number(FLOW.settleMs ?? 700);
+// випадкові дрібні паузи
 const T_JITTER   = () => 150 + Math.floor(Math.random() * 250);
-const T_OCR_NAME_GUESS = 220;   // після TAP перед читанням кліпу
+// ім’я/кліпборд
+const T_OCR_NAME_GUESS = 220;
 const T_CLIP_STEP = 180;
 const T_CLIP_ADB  = 2500;
 const T_CLIP_HOST = 3000;
-const T_LONGPRESS = 360;        // ms для swipe=long-press
+const T_LONGPRESS = 360;
+
+// додаткові “людські” паузи між профілями (env)
+const SCAN_PAUSE_MIN_MS = Number(process.env.SCAN_PAUSE_MIN_MS || 900);
+const SCAN_PAUSE_MAX_MS = Number(process.env.SCAN_PAUSE_MAX_MS || 1800);
+
+// рандомне зміщення координат тапу ±RAND_PX (env)
+const RAND_PX = Number(process.env.RAND_PX || 3);
+
+// маленький хелпер для рандомних чисел у діапазоні
+const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
+const humanPause = async () => { await sleep(randInt(SCAN_PAUSE_MIN_MS, SCAN_PAUSE_MAX_MS)); };
+const jitterPx = (v) => v + randInt(-RAND_PX, RAND_PX);
+const jitterDur = (ms=120) => Math.max(60, ms + randInt(-30, 30));
 
 /* ===================== CLI args ===================== */
 function arg(name, def) {
@@ -48,6 +72,25 @@ function arg(name, def) {
 }
 const COUNT = Number(arg("count", "40"));
 const START = Number(arg("start", "0")) % LIST.rows.length;
+
+/* ===================== Humanized navigate wrapper ===================== */
+// Обгортає navigate(): якщо дія tap — підкручує x/y та durMs; якщо масив дій — мапить.
+async function navigateHuman(actionOrArray) {
+  const massage = (a) => {
+    if (!a || typeof a !== "object") return a;
+    if (a.type === "tap" && Number.isFinite(a.x) && Number.isFinite(a.y)) {
+      return { ...a, x: jitterPx(a.x), y: jitterPx(a.y), durMs: jitterDur(a.durMs ?? 120) };
+    }
+    return a;
+  };
+
+  if (Array.isArray(actionOrArray)) {
+    const seq = actionOrArray.map(massage);
+    await navigate(seq);
+  } else {
+    await navigate(massage(actionOrArray));
+  }
+}
 
 /* ===================== Helpers: ADB & Clipboard ===================== */
 function adbArgs(args) {
@@ -99,7 +142,6 @@ async function ocrField(key, buf) {
 }
 
 /* ===================== Geometry ===================== */
-// Прямокутник під цифру рівня у правій колонці для рядка i
 function levelRectForRow(i) {
   const col = LIST.levelCol;
   const rows = LIST.rows;
@@ -120,6 +162,9 @@ function levelRectForRow(i) {
 }
 
 async function readLevelAtRow(i) {
+  // дрібна пауза перед знімком, щоб не бути надто “ідеальними”
+  await sleep(50 + randInt(0, 90));
+
   const rect = levelRectForRow(i);
   await captureScreen(SCREEN_PATH);
   const key = `lv_r${i}`;
@@ -141,8 +186,6 @@ function regionNameCenter() {
 function actionCopyFromRegions() { return CFG?.pages?.[0]?.actions?.copyName || null; }
 
 /* ===================== Clipboard name capture ===================== */
-// Копіюємо ім’я у буфер: TAP → очікування; якщо пусто — long-press + KEYCODE_COPY.
-// Читаємо спершу ADB-кліпборд; якщо порожньо і увімкнено USE_HOST_CLIPBOARD — читаємо системний (Windows) через clipboardy.
 async function copyNameIntoTexts(texts) {
   await clipboardSetEmptyADB();
   let hostPrev = "";
@@ -154,26 +197,28 @@ async function copyNameIntoTexts(texts) {
   const action = actionCopyFromRegions() || FLOW.copyName;
   const p = regionNameCenter();
   if (action) {
-    await navigate(action);
+    await navigateHuman(action);
   } else if (p) {
-    await navigate({ type: "tap", x: p.x, y: p.y, durMs: 120 });
+    await navigateHuman({ type: "tap", x: p.x, y: p.y, durMs: 120 });
   }
-  await sleep(T_OCR_NAME_GUESS);
+  await sleep(T_OCR_NAME_GUESS + randInt(0, 120));
 
-  // 1) пробуємо ADB
   let clip = await waitClipboardNonEmptyADB(T_CLIP_ADB, T_CLIP_STEP);
-
-  // 2) якщо порожньо — пробуємо host
   if (!clip && USE_HOST_CLIPBOARD) {
     clip = await waitClipboardNonEmptyHost(hostPrev, T_CLIP_HOST, T_CLIP_STEP);
   }
 
-  // 3) якщо досі порожньо — long-press + KEYCODE_COPY → знову пробуємо
   if (!clip && p) {
     try {
-      await execa(ADB, adbArgs(["shell", "input", "swipe", String(p.x), String(p.y), String(p.x), String(p.y), String(T_LONGPRESS)]), { encoding: "buffer" });
+      // Long-press через swipe — теж трохи “нерівний”
+      await execa(ADB, adbArgs([
+        "shell","input","swipe",
+        String(jitterPx(p.x)), String(jitterPx(p.y)),
+        String(jitterPx(p.x)), String(jitterPx(p.y)),
+        String(T_LONGPRESS + randInt(-60, 60))
+      ]), { encoding: "buffer" });
     } catch {}
-    await sleep(250);
+    await sleep(200 + randInt(0, 120));
     await sendKeyevent(278); // KEYCODE_COPY
     clip = await waitClipboardNonEmptyADB(2000, 180);
     if (!clip && USE_HOST_CLIPBOARD) {
@@ -183,7 +228,7 @@ async function copyNameIntoTexts(texts) {
 
   if (clip) {
     console.log(`   Clipboard name: "${clip}"`);
-    texts.name = clip; // !!! НЕ перетираємо далі OCR’ом
+    texts.name = clip; // НЕ перетираємо OCR'ом далі
   } else {
     console.log("   Clipboard name: <empty>");
   }
@@ -193,32 +238,37 @@ async function copyNameIntoTexts(texts) {
 async function scanProfileOnce() {
   const texts = {};
 
-  // 1) Копія імені в кліпборд ДО OCR
+  // 1) копія імені ДО OCR
   await copyNameIntoTexts(texts);
 
-  // 2) OCR сторінок CFG.pages
+  // невелика людська пауза
+  await sleep(120 + randInt(0, 150));
+
+  // 2) OCR сторінок
   for (const page of CFG.pages) {
     await captureScreen(SCREEN_PATH);
     const rois = await cropRegions(SCREEN_PATH, page.rois, path.join(ROOT_DIR, "screenshots", `regions_${page.name}`));
-
     for (const [k, buf] of Object.entries(rois)) {
       if (k === "name") {
-        if (!texts.name) {                       // якщо буфер порожній — підстраховка OCR
+        if (!texts.name) {
           const guess = await ocrField(k, buf);
           if (guess) texts.name = guess;
         } else {
-          // читаємо лише для логів, але НЕ замінюємо
-          await ocrField(k, buf);
+          await ocrField(k, buf); // лише для логів
         }
       } else {
         texts[k] = await ocrField(k, buf);
       }
+      // маленька варіативність між ROI
+      await sleep(randInt(20, 60));
     }
-
-    if (page.nav) { await navigate(page.nav); await sleep(T_SETTLE); }
+    if (page.nav) {
+      await navigateHuman(page.nav);
+      await sleep(T_SETTLE + randInt(0, 150));
+    }
   }
 
-  // 3) Якщо id слабкий — ще одна спроба з top
+  // 3) якщо id слабкий — ще одна спроба з top
   const idDigits = (texts.id || "").replace(/\D/g, "");
   if (!idDigits || idDigits.length < 5) {
     const first = CFG.pages[0];
@@ -232,9 +282,9 @@ async function scanProfileOnce() {
 
 /* ===================== Navigation ===================== */
 async function openCityHallList() {
-  await navigate(FLOW.openMyProfile); await sleep(T_SETTLE);
-  await navigate(FLOW.openRankings);  await sleep(T_SETTLE);
-  await navigate(FLOW.openCityHall);  await sleep(T_SETTLE);
+  await navigateHuman(FLOW.openMyProfile); await sleep(T_SETTLE + randInt(0, 120));
+  await navigateHuman(FLOW.openRankings);  await sleep(T_SETTLE + randInt(0, 120));
+  await navigateHuman(FLOW.openCityHall);  await sleep(T_SETTLE + randInt(0, 120));
 }
 
 async function isCityHallByHeader() {
@@ -252,26 +302,23 @@ async function isCityHallList() {
   return (await isCityHallByHeader()) || (await isCityHallByLevel());
 }
 
-// Два X → перевірка → (fallback) знову Rankings→CityHall (2 спроби)
 async function backToCityHallList() {
   const tryOnce = async () => {
-    await navigate(FLOW.closeDeath);
-    await sleep(T_SETTLE + 200);
-    await navigate(FLOW.closeProfile);
-    await sleep(T_SETTLE + 300);
+    await navigateHuman(FLOW.closeDeath);
+    await sleep(T_SETTLE + 200 + randInt(0, 120));
+    await navigateHuman(FLOW.closeProfile);
+    await sleep(T_SETTLE + 300 + randInt(0, 120));
     return await isCityHallList();
   };
 
   if (await tryOnce()) return true;
 
-  // fallback: ручне відкриття
-  await navigate(FLOW.openRankings);  await sleep(T_SETTLE);
-  await navigate(FLOW.openCityHall);  await sleep(T_SETTLE);
+  await navigateHuman(FLOW.openRankings);  await sleep(T_SETTLE + randInt(0, 120));
+  await navigateHuman(FLOW.openCityHall);  await sleep(T_SETTLE + randInt(0, 120));
 
   if (await isCityHallList()) return true;
 
-  // ще одна спроба (іноді гра "залипає" на модалці)
-  await sleep(400);
+  await sleep(300 + randInt(0, 180));
   return await tryOnce();
 }
 
@@ -295,6 +342,9 @@ async function main() {
   await initSchema();
   await initOCR();
 
+  const active = await kvkActiveId();
+  console.log(`Active KvK: ${active ?? "<none>"}`);
+
   const run_id = await beginRun();
   console.log(`Run: ${run_id} | CityHall25`);
 
@@ -303,15 +353,15 @@ async function main() {
   await fs.writeFile(backupRunPath, "[]").catch(() => {});
 
   await openCityHallList();
+  await humanPause(); // перша “людська” пауза
 
   let visited = 0;
   let idx = START;
-  const lastIdx = LIST.rows.length - 1; // напр., у твоєму ui.json = 4 (5 рядків)
+  const lastIdx = LIST.rows.length - 1;
 
   while (visited < COUNT) {
     const row = LIST.rows[idx];
 
-    // читаємо рівень лише якщо НЕ останній рядок: автопрокрутка нам дає нижній як "вікно"
     if (idx < lastIdx) {
       const lvl = await readLevelAtRow(idx);
       if (lvl !== 25) {
@@ -324,7 +374,7 @@ async function main() {
     }
 
     console.log(` → Tap row ${idx}${idx === lastIdx ? " (forced last row)" : " (CH25)"}`);
-    await navigate({ type: "tap", x: row.x, y: row.y, durMs: 120 });
+    await navigateHuman({ type: "tap", x: row.x, y: row.y, durMs: 120 });
     await sleep(T_SETTLE + T_JITTER());
 
     const stats = await scanProfileOnce();
@@ -335,6 +385,18 @@ async function main() {
       console.log(`   Save ${pid} "${stats.name || ""}"`);
       await upsertPlayer({ id: pid, name: stats.name || "" });
       await insertStats(run_id, pid, stats);
+
+      try {
+        const res = await kvkEnsureGoal(pid);
+        if (res) {
+          console.log(`   KvK goal ensured for ${pid}: goal_kp=${res.goal_kp}, goal_dead=${res.goal_dead}`);
+        } else {
+          console.log(`   KvK goal exists or no active KvK/latest for ${pid}`);
+        }
+      } catch (e) {
+        console.warn(`   ! kvkEnsureGoal(${pid}) failed: ${e?.message || e}`);
+      }
+
       await appendBackup(backupAllPath, stamp);
       await appendBackup(backupRunPath, stamp);
     } else {
@@ -346,10 +408,12 @@ async function main() {
       console.warn("   ! Не вдалося повернутися до City Hall списку — стоп");
       break;
     }
-    await sleep(250); // стабілізація
+
     visited++;
 
-    // інкремент: 0→1→2→…→last, а далі завжди last
+    // додаткова людська пауза між профілями
+    await humanPause();
+
     idx = Math.min(lastIdx, idx + 1);
   }
 
