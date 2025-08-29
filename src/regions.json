@@ -8,7 +8,7 @@
         "kp":    { "left": 900, "top": 255, "width": 195, "height": 38 }
       },
       "actions": {
-        "copyName": { "type": "tap", "rect": { "left": 480, "top": 170, "width": 180, "height": 40 }, "durMs": 300 }
+        "copyName": { "type": "tap", "rect": { "left": 480, "top": 170, "width": 100, "height": 40 }, "durMs": 300 }
       },
       "nav": { "type": "tap", "rect": { "left": 927, "top": 233, "width": 22, "height": 23 }, "durMs": 300 }
     },

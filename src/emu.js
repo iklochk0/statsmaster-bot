@@ -47,7 +47,7 @@ export async function navigate(nav) {
 
 /** Прочитати текст із буфера обміну Android (LDPlayer). Повертає "" якщо не вийшло. */
 export async function getClipboardText() {
-  // Сучасний шлях (Android 9+/LDPlayer9 зазвичай підтримує):
+  // Сучасний шлях
   try {
     const { stdout } = await execa(ADB, adbArgs(["shell", "cmd", "clipboard", "get"]), { encoding: "utf8" });
     return (stdout || "").trim();
