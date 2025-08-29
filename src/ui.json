@@ -3,22 +3,22 @@
     "safe": { "left": 0, "top": 0, "width": 1280, "height": 720 }
   },
   "flow": {
-    "openMyProfile": { "type": "tap", "x": 50, "y": 50,  "durMs": 120 },
-    "openRankings":  { "type": "tap", "x": 300, "y": 600, "durMs": 120 },
-    "openCityHall":  { "type": "tap", "x": 1000, "y": 400, "durMs": 120 },
-    "closeDeath":    { "type": "tap", "x": 1113, "y": 36,  "durMs": 500 },
-    "closeProfile":  { "type": "tap", "x": 1155, "y": 75,  "durMs": 500 },
+    "openMyProfile": { "type": "tap", "rect": { "left": 5, "top": 1, "width": 85, "height": 100 }, "durMs": 200 },
+    "openRankings":  { "type": "tap", "rect": { "left": 284, "top": 555, "width": 40, "height": 50 }, "durMs": 200 },
+    "openCityHall":  { "type": "tap", "rect": { "left": 835, "top": 363, "width": 275, "height": 100 }, "durMs": 200 },
+    "closeDeath":    { "type": "tap", "rect": { "left": 1139, "top": 50, "width": 50, "height": 40 }, "durMs": 200 },
+    "closeProfile":  { "type": "tap", "rect": { "left": 1088, "top": 20, "width": 55, "height": 45 }, "durMs": 200 }, 
     "settleMs": 700
   },
   "cityHallList": {
     "rows": [
-      { "x": 640, "y": 196 },
-      { "x": 640, "y": 275 },
-      { "x": 640, "y": 356 },
-      { "x": 640, "y": 436 },
-      { "x": 640, "y": 480 },
-      { "x": 640, "y": 560 },
-      { "x": 640, "y": 640 }
+      { "rect": { "left": 145, "top": 195, "width": 975, "height": 60 } },
+      { "rect": { "left": 145, "top": 275, "width": 975, "height": 60 } },
+      { "rect": { "left": 145, "top": 357, "width": 975, "height": 60 } },
+      { "rect": { "left": 145, "top": 437, "width": 975, "height": 60 } },
+      { "rect": { "left": 145, "top": 455, "width": 975, "height": 60 } },
+      { "rect": { "left": 145, "top": 535, "width": 975, "height": 60 } },
+      { "rect": { "left": 145, "top": 615, "width": 975, "height": 60 } }
     ],
     "levelCol": {
       "left": 980,

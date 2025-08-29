@@ -8,9 +8,9 @@
         "kp":    { "left": 900, "top": 255, "width": 195, "height": 38 }
       },
       "actions": {
-        "copyName": { "type": "tap", "x": 500, "y": 185, "durMs": 300 }
+        "copyName": { "type": "tap", "rect": { "left": 480, "top": 170, "width": 180, "height": 40 }, "durMs": 300 }
       },
-      "nav": { "type": "tap", "x": 940, "y": 245, "durMs": 400 }
+      "nav": { "type": "tap", "rect": { "left": 927, "top": 233, "width": 22, "height": 23 }, "durMs": 300 }
     },
     {
       "name": "mid",
@@ -21,7 +21,7 @@
         "t2": { "left": 730, "top": 368, "width": 145, "height": 30 },
         "t1": { "left": 730, "top": 330, "width": 146, "height": 30 }
       },
-      "nav": { "type": "tap", "x": 200, "y": 580, "durMs": 400 }
+      "nav": { "type": "tap", "rect": { "left": 155, "top": 555, "width": 46, "height": 50 }, "durMs": 300 }
     },
     {
       "name": "bottom",

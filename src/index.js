@@ -1,5 +1,5 @@
 // src/index.js — CH25 scanner: ordered warmup (1→4) then ghost-skip base (5→6→7→back→5)
-// + humanized timing + robust back + clipboard name + JSON backups
+// + humanized timing + random-in-rect taps (rows/flow/regions) + robust back + clipboard name + JSON backups
 
 import "dotenv/config";
 import fs from "fs/promises";
@@ -56,9 +56,10 @@ const SCAN_PAUSE_MAX_MS = Number(process.env.SCAN_PAUSE_MAX_MS || 1800);
 
 const RAND_PX = Number(process.env.RAND_PX || 3);
 
-// 0-based: 4 означає 5-та позиція
-const BASE_ROW_IDX = Number(process.env.BASE_ROW_IDX ?? 4);
+// 0-based: 4 означає 5-та позиція (база для циклу 5→6→7)
+const BASE_ROW_IDX_RAW = Number(process.env.BASE_ROW_IDX ?? 4);
 
+/* ===================== Small utils ===================== */
 const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
 const humanPause = async () => { await sleep(randInt(SCAN_PAUSE_MIN_MS, SCAN_PAUSE_MAX_MS)); };
 const jitterPx = (v) => v + randInt(-RAND_PX, RAND_PX);
@@ -71,21 +72,54 @@ function arg(name, def) {
 }
 const COUNT = Number(arg("count", "40"));
 
-/* ===================== Humanized navigate wrapper ===================== */
-async function navigateHuman(actionOrArray) {
-  const massage = (a) => {
-    if (!a || typeof a !== "object") return a;
-    if (a.type === "tap" && Number.isFinite(a.x) && Number.isFinite(a.y)) {
-      return { ...a, x: jitterPx(a.x), y: jitterPx(a.y), durMs: jitterDur(a.durMs ?? 120) };
-    }
-    return a;
-  };
+/* ========= Row helpers: random tap point & row Y (for CH-level OCR) ========= */
+function hasXY(o){ return Number.isFinite(o?.x) && Number.isFinite(o?.y); }
+function hasRect(o){ return o?.rect && Number.isFinite(o.rect.left) && Number.isFinite(o.rect.top) && Number.isFinite(o.rect.width) && Number.isFinite(o.rect.height); }
 
+// випадкова точка в прямокутнику
+function randomPointInRect(rect) {
+  const x = randInt(rect.left, rect.left + rect.width  - 1);
+  const y = randInt(rect.top , rect.top  + rect.height - 1);
+  return { x, y };
+}
+
+// центр Y рядка (для колонки CH рівня)
+function rowCenterY(row) {
+  if (Number.isFinite(row?.y)) return row.y;
+  if (row?.rect) return Math.round(row.rect.top + row.rect.height / 2);
+  return null;
+}
+
+// точка натиску для рядка
+function pointForRow(row) {
+  if (hasRect(row)) return randomPointInRect(row.rect);
+  if (hasXY(row))   return { x: jitterPx(row.x), y: jitterPx(row.y) };
+  throw new Error("Row is missing tap coordinates (x/y or rect)");
+}
+
+/* ===================== Humanized navigate wrapper (rect-aware) ===================== */
+// Масажує tap-дії: якщо є rect — беремо випадкову точку з rect; якщо x/y — додаємо джиттер.
+function massageAction(a) {
+  if (!a || typeof a !== "object") return a;
+  if (a.type !== "tap") return a;
+
+  // regions/ui можуть передати або {x,y}, або {rect:{...}}
+  if (hasRect(a)) {
+    const p = randomPointInRect(a.rect);
+    return { ...a, x: p.x, y: p.y, durMs: jitterDur(a.durMs ?? 120) };
+  }
+  if (hasXY(a)) {
+    return { ...a, x: jitterPx(a.x), y: jitterPx(a.y), durMs: jitterDur(a.durMs ?? 120) };
+  }
+  throw new Error("Tap action missing x/y or rect");
+}
+
+async function navigateHuman(actionOrArray) {
   if (Array.isArray(actionOrArray)) {
-    const seq = actionOrArray.map(massage);
+    const seq = actionOrArray.map(massageAction);
     await navigate(seq);
-  } else {
-    await navigate(massage(actionOrArray));
+  } else if (actionOrArray) {
+    await navigate(massageAction(actionOrArray));
   }
 }
 
@@ -147,14 +181,20 @@ function levelRectForRow(i) {
 
   const { left, width, height } = col;
 
-  if (Number.isFinite(col.top0)) {
-    const dy  = rows[i].y - rows[0].y;
+  // намагаємося обчислити dy від першого до i-го через центри рядків
+  const y0 = rowCenterY(rows[0]);
+  const yi = rowCenterY(rows[i]);
+
+  if (Number.isFinite(col.top0) && Number.isFinite(y0) && Number.isFinite(yi)) {
+    const dy  = yi - y0;
     const top = Math.max(0, Math.min(720 - height, Math.round(col.top0 + dy)));
     return { left, top, width, height };
   }
 
+  // fallback: офсети або просто центр i-го
+  const baseY = Number.isFinite(yi) ? yi : 360;
   const off = Array.isArray(col.topOffset) ? (col.topOffset[i] ?? 0) : (col.topOffset ?? 0);
-  const top = Math.max(0, Math.min(720 - height, Math.round(rows[i].y + off - height / 2)));
+  const top = Math.max(0, Math.min(720 - height, Math.round(baseY + off - height / 2)));
   return { left, top, width, height };
 }
 
@@ -208,12 +248,14 @@ async function waitProfileOrGiveUp(timeoutMs = 3200, pollMs = 250) {
   return false;
 }
 
-/* Тап по конкретному рядку з кількома спробами */
+/* Тап по конкретному рядку з кількома спробами (rect-aware) */
 async function openProfileFromRow(idx, retries = 2) {
   const row = LIST.rows[idx];
   for (let attempt = 1; attempt <= retries; attempt++) {
-    console.log(` → Tap row ${idx} (attempt ${attempt}/${retries})`);
-    await navigateHuman({ type: "tap", x: row.x, y: row.y, durMs: 120 });
+    const p = pointForRow(row);
+    const dur = jitterDur(120);
+    console.log(` → Tap row ${idx} at (${p.x},${p.y}) dur=${dur}ms (attempt ${attempt}/${retries})`);
+    await navigate({ type: "tap", x: p.x, y: p.y, durMs: dur });
     await sleep(T_SETTLE + T_JITTER());
     if (await waitProfileOrGiveUp(3200, 250)) return true;
     await sleep(200 + randInt(0, 200));
@@ -222,6 +264,7 @@ async function openProfileFromRow(idx, retries = 2) {
 }
 
 /* Спробувати 5 → 6 → 7; повертає {opened, usedIndex} */
+const BASE_ROW_IDX = Math.max(0, Math.min(BASE_ROW_IDX_RAW, LIST.rows.length - 1));
 async function openProfileWithFallbacks(baseIdx = BASE_ROW_IDX) {
   const candidates = [baseIdx, baseIdx + 1, baseIdx + 2].filter(i => i < LIST.rows.length);
   for (const i of candidates) {
@@ -240,8 +283,10 @@ async function copyNameIntoTexts(texts) {
     hostPrev = await clipboardGetHost();
   }
 
+  // regions.json може мати actions.copyName як {x,y} або {rect}
   const action = actionCopyFromRegions() || FLOW.copyName;
   const p = regionNameCenter();
+
   if (action) {
     await navigateHuman(action);
   } else if (p) {
@@ -294,13 +339,14 @@ async function scanProfileOnce() {
           const guess = await ocrField(k, buf);
           if (guess) texts.name = guess;
         } else {
-          await ocrField(k, buf);
+          await ocrField(k, buf); // лише для логів
         }
       } else {
         texts[k] = await ocrField(k, buf);
       }
       await sleep(randInt(20, 60));
     }
+    // nav з regions.json може бути {x,y} або {rect}
     if (page.nav) {
       await navigateHuman(page.nav);
       await sleep(T_SETTLE + randInt(0, 150));
@@ -320,6 +366,7 @@ async function scanProfileOnce() {
 
 /* ===================== Navigation (open/back/list checks) ===================== */
 async function openCityHallList() {
+  // FLOW.* також можуть бути {x,y} або {rect}
   await navigateHuman(FLOW.openMyProfile); await sleep(T_SETTLE + randInt(0, 120));
   await navigateHuman(FLOW.openRankings);  await sleep(T_SETTLE + randInt(0, 120));
   await navigateHuman(FLOW.openCityHall);  await sleep(T_SETTLE + randInt(0, 120));
