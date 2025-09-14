@@ -1,6 +1,8 @@
 // src/index.js — CH25 scanner: ordered warmup (1→4) then ghost-skip base (5→6→7→back→5)
-// + tapRect support (random point inside areas) + rect-aware level OCR + safe clamping
-// + no double jitter + humanized timing + robust back + clipboard name + JSON backups
+// + tapRect (random point inside) — БЕЗ будь-якого масштабування екрану
+// + rect-aware level OCR + safe clamping + humanized timing + clipboard name + JSON backups
+// + ДОКЛАДНЕ ЛОГУВАННЯ у консоль і у out/actions-run-<run_id>.json
+// + FAKE SWIPES на екрані "смертей" + періодичні IDLE-паузи
 
 import "dotenv/config";
 import fs from "fs/promises";
@@ -44,7 +46,7 @@ const USE_HOST_CLIPBOARD = process.env.USE_HOST_CLIPBOARD !== "false"; // defaul
 const SAFE = UI.screen?.safe ?? { left: 0, top: 0, width: 1280, height: 720 };
 const ANCHOR_CITYHALL = UI.anchors?.cityHall ?? { left: 520, top: 110, width: 260, height: 60 };
 
-/* ===================== Tunables (timings & humanization) ===================== */
+/* ===================== Timings ===================== */
 const T_SETTLE = Number(FLOW.settleMs ?? 700);
 const T_JITTER   = () => 150 + Math.floor(Math.random() * 250);
 const T_OCR_NAME_GUESS = 220;
@@ -56,34 +58,41 @@ const T_LONGPRESS = 360;
 const SCAN_PAUSE_MIN_MS = Number(process.env.SCAN_PAUSE_MIN_MS || 900);
 const SCAN_PAUSE_MAX_MS = Number(process.env.SCAN_PAUSE_MAX_MS || 1800);
 
-const RAND_PX = Number(process.env.RAND_PX || 3);
+// якщо хочеш повністю стабільні точки — тримай 0
+const RAND_PX = Number(process.env.RAND_PX || 0);
 
-// 0-based: 4 означає 5-та позиція
+// 0-based: 4 — це 5-та позиція
 const BASE_ROW_IDX = Number(process.env.BASE_ROW_IDX ?? 4);
+
+/* ====== Настройки IDLE-пауз ====== */
+const IDLE_EVERY_MIN = Number(process.env.IDLE_EVERY_MIN || 3);     // кожні N хвилин
+const IDLE_MIN_MS    = Number(process.env.IDLE_MIN_MS || 5000);     // мінімум "стояти"
+const IDLE_MAX_MS    = Number(process.env.IDLE_MAX_MS || 20000);    // максимум "стояти"
+
+/* ====== Настройки фейкових свайпів на "смертях" ====== */
+const FAKE_SWIPE_DY    = Number(process.env.FAKE_SWIPE_DY || 140);
+const FAKE_SWIPE_COUNT = Number(process.env.FAKE_SWIPE_COUNT || 1);
+const FAKE_SWIPE_DUR   = Number(process.env.FAKE_SWIPE_DUR || 380);
+
+const FAKE_SWIPE_PROB = Number(process.env.FAKE_SWIPE_PROB || 0.3);
 
 const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
 const humanPause = async () => { await sleep(randInt(SCAN_PAUSE_MIN_MS, SCAN_PAUSE_MAX_MS)); };
 const jitterPx = (v) => v + randInt(-RAND_PX, RAND_PX);
 const jitterDur = (ms=120) => Math.max(60, ms + randInt(-30, 30));
 
-/* ===================== Helpers: geometry & safety ===================== */
-const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
-
-function clampToSafe(pt) {
-  const x = clamp(pt.x, SAFE.left, SAFE.left + SAFE.width - 1);
-  const y = clamp(pt.y, SAFE.top,  SAFE.top  + SAFE.height - 1);
-  return { ...pt, x, y };
+/* ===================== Логування (консоль + файл) ===================== */
+const ACTION_LOG = [];
+function logAction(type, detail) {
+  const entry = { at: new Date().toISOString(), type, ...detail };
+  ACTION_LOG.push(entry);
+  // коротка консоль: тип + важливе
+  const brief = JSON.stringify(detail);
+  console.log(`[ACTION] ${type} ${brief.length > 200 ? brief.slice(0,200)+"…" : brief}`);
 }
-
-function pickPointInRect(rect) {
-  const x = rect.left + randInt(0, Math.max(0, rect.width  - 1));
-  const y = rect.top  + randInt(0, Math.max(0, rect.height - 1));
-  return clampToSafe({ x, y });
-}
-
-function hasRect(a) {
-  return a && typeof a === "object" && Number.isFinite(a.left) && Number.isFinite(a.top)
-         && Number.isFinite(a.width) && Number.isFinite(a.height);
+async function sleepLog(ms, reason = "") {
+  logAction("sleep", { ms, reason });
+  await sleep(ms);
 }
 
 /* ===================== CLI args ===================== */
@@ -93,89 +102,110 @@ function arg(name, def) {
 }
 const COUNT = Number(arg("count", "40"));
 
-/* ===================== Humanized navigate wrapper ===================== */
-/**
- * Підтримує:
- *  - {type:"tap", x, y, durMs}
- *  - {type:"tap", rect:{left,top,width,height}, durMs}
- *  - {type:"tapRect", left, top, width, height, durMs}
- *  - Масив таких дій
- * Якщо точка вже обрана з rect — НЕ додаємо додатковий джиттер (_preRandomized).
- */
-async function navigateHuman(actionOrArray) {
-  const massage = (a) => {
-    if (!a || typeof a !== "object") return a;
-
-    // tap з вкладеним rect
-    if (a.type === "tap" && a.rect && hasRect(a.rect)) {
-      const p = pickPointInRect(a.rect);
-      return { type: "tap", x: p.x, y: p.y, durMs: a.durMs ?? 120, _preRandomized: true };
-    }
-
-    // окремий тип tapRect
-    if (a.type === "tapRect" && hasRect(a)) {
-      const p = pickPointInRect(a);
-      return { type: "tap", x: p.x, y: p.y, durMs: a.durMs ?? 120, _preRandomized: true };
-    }
-
-    // звичайний tap
-    if (a.type === "tap" && Number.isFinite(a.x) && Number.isFinite(a.y)) {
-      const base = clampToSafe({ x: a.x, y: a.y });
-      if (a._preRandomized) return { ...a, x: base.x, y: base.y };
-      const j = { x: jitterPx(base.x), y: jitterPx(base.y) };
-      const c = clampToSafe(j);
-      return { ...a, x: c.x, y: c.y, durMs: jitterDur(a.durMs ?? 120) };
-    }
-
-    return a;
-  };
-
-  if (Array.isArray(actionOrArray)) {
-    const seq = actionOrArray.map(massage);
-    await navigate(seq);
-  } else {
-    await navigate(massage(actionOrArray));
-  }
-}
-
-/* ===================== Helpers: ADB & Clipboard ===================== */
+/* ===================== ADB & geometry ===================== */
 function adbArgs(args) {
   const a = [];
   if (SERIAL) a.push("-s", SERIAL);
   a.push(...args);
   return a;
 }
+
+// Точний "тап" через swipe one-point (без масштабування)
+async function adbTapExact(x, y, durMs = 120, meta = {}) {
+  const xx = Math.round(x);
+  const yy = Math.round(y);
+  const dd = Math.max(60, Math.round(durMs));
+  logAction("tap", { x: xx, y: yy, durMs: dd, ...meta });
+  await execa(
+    ADB,
+    adbArgs(["shell","input","swipe", String(xx), String(yy), String(xx), String(yy), String(dd)]),
+    { encoding: "buffer" }
+  );
+}
+
+async function adbSwipe(x1, y1, x2, y2, durMs = 300, meta = {}) {
+  const xx1 = Math.round(x1), yy1 = Math.round(y1);
+  const xx2 = Math.round(x2), yy2 = Math.round(y2);
+  const dd  = Math.max(80, Math.round(durMs));
+  logAction("swipe", { from: { x: xx1, y: yy1 }, to: { x: xx2, y: yy2 }, durMs: dd, ...meta });
+  await execa(
+    ADB,
+    adbArgs(["shell","input","swipe", String(xx1), String(yy1), String(xx2), String(yy2), String(dd)]),
+    { encoding: "buffer" }
+  );
+}
+
 async function sendKeyevent(code) {
+  logAction("keyevent", { code });
   try { await execa(ADB, adbArgs(["shell", "input", "keyevent", String(code)]), { encoding: "buffer" }); } catch {}
 }
-async function clipboardSetEmptyADB() {
-  try { await execa(ADB, adbArgs(["shell", "cmd", "clipboard", "set", ""]), { encoding: "utf8" }); } catch {}
+
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+
+function clampToSafe(pt) {
+  const x = clamp(pt.x, SAFE.left, SAFE.left + SAFE.width - 1);
+  const y = clamp(pt.y, SAFE.top,  SAFE.top  + SAFE.height - 1);
+  return { ...pt, x, y };
 }
-async function clipboardGetADB() {
-  try {
-    const { stdout } = await execa(ADB, adbArgs(["shell", "cmd", "clipboard", "get"]), { encoding: "utf8" });
-    return (stdout || "").trim();
-  } catch { return ""; }
+
+function hasRect(a) {
+  return a && typeof a === "object" && Number.isFinite(a.left) && Number.isFinite(a.top)
+         && Number.isFinite(a.width) && Number.isFinite(a.height);
 }
-async function waitClipboardNonEmptyADB(maxMs = T_CLIP_ADB, stepMs = T_CLIP_STEP) {
-  const end = Date.now() + maxMs;
-  while (Date.now() < end) {
-    const t = await clipboardGetADB();
-    if (t) return t;
-    await sleep(stepMs);
+
+function pickPointInRect(rect) {
+  // випадкова точка всередині rect у координатах SAFE
+  const x = rect.left + randInt(0, Math.max(0, rect.width  - 1));
+  const y = rect.top  + randInt(0, Math.max(0, rect.height - 1));
+  return clampToSafe({ x, y });
+}
+
+/* ===================== navigateHuman: БЕЗ будь-якого скейлу ===================== */
+/**
+ * Підтримує:
+ *  - {type:"tap", x, y, durMs}
+ *  - {type:"tap", rect:{left,top,width,height}, durMs}
+ *  - {type:"tapRect", left, top, width, height, durMs}
+ *  - Масив таких дій
+ */
+async function navigateHuman(actionOrArray) {
+  const doOne = async (a) => {
+    if (!a || typeof a !== "object") return;
+
+    // tap з вкладеним rect
+    if (a.type === "tap" && a.rect && hasRect(a.rect)) {
+      const p = pickPointInRect(a.rect);
+      logAction("tapRect", { rect: a.rect, picked: p });
+      await adbTapExact(p.x, p.y, a.durMs ?? 120);
+      return;
+    }
+
+    // tapRect
+    if (a.type === "tapRect" && hasRect(a)) {
+      const p = pickPointInRect(a);
+      logAction("tapRect", { rect: a, picked: p });
+      await adbTapExact(p.x, p.y, a.durMs ?? 120);
+      return;
+    }
+
+    // звичайний tap x/y
+    if (a.type === "tap" && Number.isFinite(a.x) && Number.isFinite(a.y)) {
+      const base = clampToSafe({ x: a.x, y: a.y });
+      const j = RAND_PX ? clampToSafe({ x: jitterPx(base.x), y: jitterPx(base.y) }) : base;
+      await adbTapExact(j.x, j.y, jitterDur(a.durMs ?? 120));
+      return;
+    }
+
+    // інше — як було (наразі не використовується)
+    logAction("navigate-pass", { raw: a });
+    await navigate(a);
+  };
+
+  if (Array.isArray(actionOrArray)) {
+    for (const a of actionOrArray) await doOne(a);
+  } else {
+    await doOne(actionOrArray);
   }
-  return "";
-}
-async function clipboardSetEmptyHost() { try { await clipboardy.write(""); } catch {} }
-async function clipboardGetHost() { try { return (await clipboardy.read()) ?? ""; } catch { return ""; } }
-async function waitClipboardNonEmptyHost(prev = "", maxMs = T_CLIP_HOST, stepMs = T_CLIP_STEP) {
-  const end = Date.now() + maxMs;
-  while (Date.now() < end) {
-    const t = await clipboardGetHost();
-    if (t && t !== prev) return t;
-    await sleep(stepMs);
-  }
-  return "";
 }
 
 /* ===================== OCR utils ===================== */
@@ -183,12 +213,12 @@ const DIGITS = "0123456789";
 async function ocrField(key, buf) {
   const wl = key === "name" ? null : DIGITS;
   const txt = (await ocrBuffer(buf, wl)).trim();
-  console.log(`   OCR ${key}: "${txt}"${wl ? " [digits]" : ""}`);
+  logAction("ocr", { key, text: txt });
   return txt;
 }
 
 /* ===================== Geometry (CH level col) ===================== */
-// референсний Y для рядка: центр rect або y
+// ref Y для рядка (підтримка rect)
 function rowRefY(i) {
   const r = LIST.rows[i];
   if (!r) throw new Error(`ui.cityHallList.rows[${i}] missing`);
@@ -220,21 +250,20 @@ function levelRectForRow(i) {
 }
 
 async function readLevelAtRow(i) {
-  await sleep(50 + randInt(0, 90));
+  await sleepLog(50 + randInt(0, 90), "before OCR row");
   const rect = levelRectForRow(i);
   await captureScreen(SCREEN_PATH);
   const key = `lv_r${i}`;
   const outDir = path.join(ROOT_DIR, "screenshots", "ch_levels");
   const piece = await cropRegions(SCREEN_PATH, { [key]: rect }, outDir);
   const buf = piece[key];
-  if (buf) await fs.writeFile(path.join(outDir, `${key}.png`), buf);
   const raw = buf ? (await ocrBuffer(buf, DIGITS)).trim() : "";
   const n = Number((raw || "").replace(/\D/g, ""));
-  console.log(` - Row ${i}: rect=${JSON.stringify(rect)} OCR="${raw}" -> ${n}`);
+  logAction("ocrRow", { row: i, rect, raw, parsed: n });
   return Number.isFinite(n) ? n : NaN;
 }
 
-/* ===================== Profile detection ===================== */
+/* ===================== Profile screen detection ===================== */
 function regionNameCenter() {
   const r = CFG?.pages?.[0]?.rois?.name;
   if (!r) return null;
@@ -260,55 +289,87 @@ async function isProfileScreen() {
 
 async function waitProfileOrGiveUp(timeoutMs = 3200, pollMs = 250) {
   const end = Date.now() + timeoutMs;
-  await sleep(120);
+  await sleepLog(120, "before profile poll");
   while (Date.now() < end) {
     if (await isProfileScreen()) return true;
-    if (await isCityHallList()) { await sleep(pollMs); continue; }
-    await sleep(pollMs);
+    if (await isCityHallList()) { await sleepLog(pollMs, "still in list"); continue; }
+    await sleepLog(pollMs, "poll profile");
   }
   return false;
 }
 
-/* ===================== Taps for rows (supports rect) ===================== */
+/* ===================== Row taps (supports rect) ===================== */
 function rowPoint(i) {
   const r = LIST.rows[i];
   if (!r) throw new Error(`cityHallList.rows[${i}] missing`);
   if (r.rect && hasRect(r.rect)) {
-    const p = pickPointInRect(r.rect);
-    return { ...p, _preRandomized: true };
+    return pickPointInRect(r.rect); // SAFE random
   }
-  const base = clampToSafe({ x: r.x, y: r.y });
-  return { x: base.x, y: base.y, _preRandomized: false };
+  return clampToSafe({ x: r.x, y: r.y });
 }
 
-/* Тап по конкретному рядку з кількома спробами */
 async function openProfileFromRow(idx, retries = 2) {
   if (!Number.isInteger(idx) || idx < 0 || idx >= LIST.rows.length) {
     console.warn(`   ! openProfileFromRow: idx ${idx} out of range`);
+    logAction("rowTap-invalid", { idx });
     return false;
   }
   for (let attempt = 1; attempt <= retries; attempt++) {
     const p = rowPoint(idx);
-    console.log(` → Tap row ${idx} at (${p.x},${p.y}) (attempt ${attempt}/${retries})`);
-    await navigateHuman({ type: "tap", x: p.x, y: p.y, durMs: 120, _preRandomized: p._preRandomized });
-    await sleep(T_SETTLE + T_JITTER());
+    logAction("rowTap", { idx, attempt, picked: p });
+    await adbTapExact(p.x, p.y, 120, { idx, attempt });
+    await sleepLog(T_SETTLE + T_JITTER(), "after row tap");
     if (await waitProfileOrGiveUp(3200, 250)) return true;
-    await sleep(200 + randInt(0, 200));
+    await sleepLog(200 + randInt(0, 200), "retry row tap");
   }
   return false;
 }
 
-/* Спробувати 5 → 6 → 7; повертає {opened, usedIndex} */
 async function openProfileWithFallbacks(baseIdx = BASE_ROW_IDX) {
   const candidates = [baseIdx, baseIdx + 1, baseIdx + 2].filter(i => i < LIST.rows.length);
+  logAction("fallback-start", { baseIdx, candidates });
   for (const i of candidates) {
     const ok = await openProfileFromRow(i, i === baseIdx ? 3 : 2);
-    if (ok) return { opened: true, usedIndex: i };
+    if (ok) {
+      logAction("fallback-success", { usedIndex: i });
+      return { opened: true, usedIndex: i };
+    }
   }
+  logAction("fallback-failed", { baseIdx });
   return { opened: false, usedIndex: -1 };
 }
 
 /* ===================== Clipboard name capture ===================== */
+async function clipboardSetEmptyADB() {
+  try { await execa(ADB, adbArgs(["shell", "cmd", "clipboard", "set", ""]), { encoding: "utf8" }); } catch {}
+}
+async function clipboardGetADB() {
+  try {
+    const { stdout } = await execa(ADB, adbArgs(["shell", "cmd", "clipboard", "get"]), { encoding: "utf8" });
+    return (stdout || "").trim();
+  } catch { return ""; }
+}
+async function waitClipboardNonEmptyADB(maxMs = T_CLIP_ADB, stepMs = T_CLIP_STEP) {
+  const end = Date.now() + maxMs;
+  while (Date.now() < end) {
+    const t = await clipboardGetADB();
+    if (t) return t;
+    await sleep(stepMs);
+  }
+  return "";
+}
+async function clipboardSetEmptyHost() { try { await clipboardy.write(""); } catch {} }
+async function clipboardGetHost() { try { return (await clipboardy.read()) ?? ""; } catch { return ""; } }
+async function waitClipboardNonEmptyHost(prev = "", maxMs = T_CLIP_HOST, stepMs = T_CLIP_STEP) {
+  const end = Date.now() + maxMs;
+  while (Date.now() < end) {
+    const t = await clipboardGetHost();
+    if (t && t !== prev) return t;
+    await sleep(stepMs);
+  }
+  return "";
+}
+
 async function copyNameIntoTexts(texts) {
   await clipboardSetEmptyADB();
   let hostPrev = "";
@@ -320,11 +381,13 @@ async function copyNameIntoTexts(texts) {
   const action = actionCopyFromRegions() || FLOW.copyName;
   const p = regionNameCenter();
   if (action) {
-    await navigateHuman(action); // tap або tap з rect — обробиться
+    logAction("copyName-tap", { action });
+    await navigateHuman(action); // tap/tapRect (без скейлу)
   } else if (p) {
-    await navigateHuman({ type: "tap", x: p.x, y: p.y, durMs: 120 });
+    logAction("copyName-tap", { point: p });
+    await adbTapExact(p.x, p.y, 120);
   }
-  await sleep(T_OCR_NAME_GUESS + randInt(0, 120));
+  await sleepLog(T_OCR_NAME_GUESS + randInt(0, 120), "wait copyName");
 
   let clip = await waitClipboardNonEmptyADB(T_CLIP_ADB, T_CLIP_STEP);
   if (!clip && USE_HOST_CLIPBOARD) {
@@ -333,15 +396,11 @@ async function copyNameIntoTexts(texts) {
 
   if (!clip && p) {
     try {
-      const p2 = clampToSafe({ x: p.x, y: p.y });
-      await execa(ADB, adbArgs([
-        "shell","input","swipe",
-        String(jitterPx(p2.x)), String(jitterPx(p2.y)),
-        String(jitterPx(p2.x)), String(jitterPx(p2.y)),
-        String(T_LONGPRESS + randInt(-60, 60))
-      ]), { encoding: "buffer" });
+      const x = Math.round(p.x), y = Math.round(p.y);
+      logAction("longpress", { x, y, dur: T_LONGPRESS });
+      await execa(ADB, adbArgs(["shell","input","swipe", String(x), String(y), String(x), String(y), String(T_LONGPRESS + randInt(-60, 60))]), { encoding: "buffer" });
     } catch {}
-    await sleep(200 + randInt(0, 120));
+    await sleepLog(200 + randInt(0, 120), "after longpress");
     await sendKeyevent(278); // KEYCODE_COPY
     clip = await waitClipboardNonEmptyADB(2000, 180);
     if (!clip && USE_HOST_CLIPBOARD) {
@@ -350,10 +409,10 @@ async function copyNameIntoTexts(texts) {
   }
 
   if (clip) {
-    console.log(`   Clipboard name: "${clip}"`);
+    logAction("clipboard-name", { text: clip });
     texts.name = clip;
   } else {
-    console.log("   Clipboard name: <empty>");
+    logAction("clipboard-name", { text: "<empty>" });
   }
 }
 
@@ -361,9 +420,17 @@ async function copyNameIntoTexts(texts) {
 async function scanProfileOnce() {
   const texts = {};
   await copyNameIntoTexts(texts);
-  await sleep(120 + randInt(0, 150));
+  await sleepLog(120 + randInt(0, 150), "after copyName");
 
   for (const page of CFG.pages) {
+    // ДЛЯ "bottom" (де dead) — іноді робимо фейкові свайпи
+    if (page.name === "bottom") {
+      // шанс 30% зробити свайп (середнє 3 рази на 10 профілів)
+      if (Math.random() < FAKE_SWIPE_PROB) {
+        await fakeSwipeInDead();
+      }
+    }
+
     await captureScreen(SCREEN_PATH);
     const rois = await cropRegions(SCREEN_PATH, page.rois, path.join(ROOT_DIR, "screenshots", `regions_${page.name}`));
     for (const [k, buf] of Object.entries(rois)) {
@@ -377,11 +444,13 @@ async function scanProfileOnce() {
       } else {
         texts[k] = await ocrField(k, buf);
       }
-      await sleep(randInt(20, 60));
+      await sleepLog(randInt(20, 60), "between ocr fields");
     }
+
     if (page.nav) {
-      await navigateHuman(page.nav); // tap або tapRect
-      await sleep(T_SETTLE + randInt(0, 150));
+      logAction("page-nav", { page: page.name, nav: page.nav });
+      await navigateHuman(page.nav);
+      await sleepLog(T_SETTLE + randInt(0, 150), "after page nav");
     }
   }
 
@@ -393,14 +462,21 @@ async function scanProfileOnce() {
     if (roisTop.id) texts.id = (await ocrBuffer(roisTop.id, DIGITS)).trim();
   }
 
-  return parseStats(texts);
+  const parsed = parseStats(texts);
+  logAction("scanProfileOnce-result", { parsed });
+  return parsed;
 }
 
 /* ===================== Navigation (open/back/list checks) ===================== */
 async function openCityHallList() {
-  await navigateHuman(FLOW.openMyProfile); await sleep(T_SETTLE + randInt(0, 120));
-  await navigateHuman(FLOW.openRankings);  await sleep(T_SETTLE + randInt(0, 120));
-  await navigateHuman(FLOW.openCityHall);  await sleep(T_SETTLE + randInt(0, 120));
+  logAction("nav-seq", { step: "openMyProfile" });
+  await navigateHuman(FLOW.openMyProfile); await sleepLog(T_SETTLE + T_JITTER(), "after openMyProfile");
+
+  logAction("nav-seq", { step: "openRankings" });
+  await navigateHuman(FLOW.openRankings);  await sleepLog(T_SETTLE + T_JITTER(), "after openRankings");
+
+  logAction("nav-seq", { step: "openCityHall" });
+  await navigateHuman(FLOW.openCityHall);  await sleepLog(T_SETTLE + T_JITTER(), "after openCityHall");
 }
 
 async function isCityHallByHeader() {
@@ -408,34 +484,33 @@ async function isCityHallByHeader() {
   const piece = await cropRegions(SCREEN_PATH, { hdr: ANCHOR_CITYHALL }, path.join(ROOT_DIR, "screenshots", "anchors"));
   const buf = piece.hdr;
   const txt = buf ? (await ocrBuffer(buf, null)).toLowerCase() : "";
-  return txt.includes("city") && txt.includes("hall");
+  const ok = txt.includes("city") && txt.includes("hall");
+  logAction("probe-cityhall-header", { text: txt, ok });
+  return ok;
 }
 async function isCityHallByLevel() {
   const n = await readLevelAtRow(0);
-  return Number.isFinite(n) && n >= 1 && n <= 25;
+  const ok = Number.isFinite(n) && n >= 1 && n <= 25;
+  logAction("probe-cityhall-level", { n, ok });
+  return ok;
 }
 async function isCityHallList() {
-  return (await isCityHallByHeader()) || (await isCityHallByLevel());
+  const ok = (await isCityHallByHeader()) || (await isCityHallByLevel());
+  logAction("probe-cityhall", { ok });
+  return ok;
 }
 
+// Мінімалістичне повернення: тільки closeDeath → closeProfile
 async function backToCityHallList() {
-  const tryOnce = async () => {
-    await navigateHuman(FLOW.closeDeath);
-    await sleep(T_SETTLE + 200 + randInt(0, 120));
-    await navigateHuman(FLOW.closeProfile);
-    await sleep(T_SETTLE + 300 + randInt(0, 120));
-    return await isCityHallList();
-  };
+  logAction("back", { step: "closeDeath" });
+  await navigateHuman(FLOW.closeDeath);
+  await sleepLog(T_SETTLE, "after closeDeath");
 
-  if (await tryOnce()) return true;
+  logAction("back", { step: "closeProfile" });
+  await navigateHuman(FLOW.closeProfile);
+  await sleepLog(T_SETTLE, "after closeProfile");
 
-  await navigateHuman(FLOW.openRankings);  await sleep(T_SETTLE + randInt(0, 120));
-  await navigateHuman(FLOW.openCityHall);  await sleep(T_SETTLE + randInt(0, 120));
-
-  if (await isCityHallList()) return true;
-
-  await sleep(300 + randInt(0, 180));
-  return await tryOnce();
+  return true;
 }
 
 /* ===================== JSON backups ===================== */
@@ -451,6 +526,19 @@ async function appendBackup(filePath, record) {
   const arr = await readBackupArray(filePath);
   arr.push(record);
   await fs.writeFile(filePath, JSON.stringify(arr, null, 2));
+}
+
+/* ===================== IDLE-пауза раз на N хвилин ===================== */
+let _lastIdleTs = Date.now();
+async function maybeIdlePause() {
+  const period = Math.max(0, IDLE_EVERY_MIN) * 60_000;
+  if (!period) return;
+  const now = Date.now();
+  if (now - _lastIdleTs >= period) {
+    const ms = randInt(IDLE_MIN_MS, IDLE_MAX_MS);
+    await sleepLog(ms, "idle pause");
+    _lastIdleTs = Date.now();
+  }
 }
 
 /* ===================== Main ===================== */
@@ -475,11 +563,14 @@ async function main() {
 
   /* ---- ФАЗА 1: Прохід 1→4 (індекси 0..BASE_ROW_IDX-1) у строгому порядку ---- */
   for (let i = 0; i < Math.min(BASE_ROW_IDX, LIST.rows.length) && visited < COUNT; i++) {
+    await maybeIdlePause();
+
     if (i < LIST.rows.length - 1) {
       const lvl = await readLevelAtRow(i);
       if (lvl !== 25) {
         console.log(`   Skip row ${i}: CH=${Number.isNaN(lvl) ? "?" : lvl}`);
-        await sleep(200 + T_JITTER());
+        logAction("row-skip", { idx: i, lvl });
+        await sleepLog(200 + T_JITTER(), "after skip non-25");
         visited++;
         await humanPause();
         continue;
@@ -489,41 +580,53 @@ async function main() {
     const opened = await openProfileFromRow(i, 3);
     if (!opened) {
       console.warn(`   ! Row ${i} did not open — skip`);
+      logAction("row-open-failed", { idx: i });
       visited++;
       await humanPause();
       continue;
     }
 
+    // профіль відкрито — скануємо
     const stats = await scanProfileOnce();
     const stamp = { run_id, at: new Date().toISOString(), stats };
 
     const pid = Number(String(stats?.id || "").replace(/\D/g, ""));
     if (Number.isFinite(pid) && String(pid).length >= 5) {
       console.log(`   Save ${pid} "${stats.name || ""}"`);
+      logAction("save-player", { pid, name: stats.name || "" });
       await upsertPlayer({ id: pid, name: stats.name || "" });
       await insertStats(run_id, pid, stats);
+
       try {
         const res = await kvkEnsureGoal(pid);
-        if (res) console.log(`   KvK goal ensured for ${pid}`);
-      } catch {}
+        if (res) logAction("kvkEnsureGoal", { pid, res });
+      } catch (e) {
+        logAction("kvkEnsureGoal-error", { pid, error: e?.message || String(e) });
+      }
+
       await appendBackup(backupAllPath, stamp);
       await appendBackup(backupRunPath, stamp);
     } else {
       console.warn("   ! No reliable player id recognized, skipped");
+      logAction("save-skip-noid", { stats });
     }
 
     const ok = await backToCityHallList();
-    if (!ok) { console.warn("   ! Can't return to list — stop"); break; }
+    if (!ok) { console.warn("   ! Can't return to list — stop"); logAction("back-failed", {}); break; }
 
     visited++;
     await humanPause();
+    await maybeIdlePause();
   }
 
   /* ---- ФАЗА 2: Базовий цикл із 5-ю позицією та резервами 6→7 ---- */
   while (visited < COUNT) {
+    await maybeIdlePause();
+
     const { opened, usedIndex } = await openProfileWithFallbacks(BASE_ROW_IDX);
     if (!opened) {
       console.warn("   ! Ghost chain (5/6/7) — skip this slot");
+      logAction("ghost-chain-skip", {});
       visited++;
       await humanPause();
       continue;
@@ -535,36 +638,52 @@ async function main() {
     const pid = Number(String(stats?.id || "").replace(/\D/g, ""));
     if (Number.isFinite(pid) && String(pid).length >= 5) {
       console.log(`   Save ${pid} "${stats.name || ""}"`);
+      logAction("save-player", { pid, name: stats.name || "" });
       await upsertPlayer({ id: pid, name: stats.name || "" });
       await insertStats(run_id, pid, stats);
       try {
         const res = await kvkEnsureGoal(pid);
-        if (res) console.log(`   KvK goal ensured for ${pid}`);
-      } catch {}
+        if (res) logAction("kvkEnsureGoal", { pid, res });
+      } catch (e) {
+        logAction("kvkEnsureGoal-error", { pid, error: e?.message || String(e) });
+      }
       await appendBackup(backupAllPath, stamp);
       await appendBackup(backupRunPath, stamp);
     } else {
       console.warn("   ! No reliable player id recognized, skipped");
+      logAction("save-skip-noid", { stats });
     }
 
     const ok = await backToCityHallList();
-    if (!ok) { console.warn("   ! Can't return to list — stop"); break; }
+    if (!ok) { console.warn("   ! Can't return to list — stop"); logAction("back-failed", {}); break; }
 
     visited++;
     await humanPause();
+    await maybeIdlePause();
 
     if (usedIndex !== BASE_ROW_IDX) {
       console.log(`   Used fallback row ${usedIndex} → next loop presses base 5 again`);
+      logAction("fallback-keep-base", { usedIndex });
     }
   }
 
-  console.log(`\n✓ Done: visited ${visited} rows\nBackups:\n  - ${path.relative(ROOT_DIR, backupAllPath)}\n  - ${path.relative(ROOT_DIR, backupRunPath)}`);
+  console.log(`\n✓ Done: visited ${visited} rows`);
+  const actionsPath = path.join(OUT_DIR, `actions-run-${run_id}.json`);
+  await fs.writeFile(actionsPath, JSON.stringify(ACTION_LOG, null, 2));
+  console.log(`Action log saved: ${path.relative(ROOT_DIR, actionsPath)}`);
+
+  console.log(`Backups:\n  - ${path.relative(ROOT_DIR, backupAllPath)}\n  - ${path.relative(ROOT_DIR, backupRunPath)}`);
   await closeOCR();
   await closeDb();
 }
 
 main().catch(async (e) => {
   console.error(e);
+  try {
+    const actionsPath = path.join(OUT_DIR, `actions-run-error-${Date.now()}.json`);
+    await fs.writeFile(actionsPath, JSON.stringify(ACTION_LOG, null, 2));
+    console.log(`Action log (error) saved: ${actionsPath}`);
+  } catch {}
   await closeOCR().catch(() => {});
   await closeDb().catch(() => {});
   process.exit(1);
