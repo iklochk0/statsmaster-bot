@@ -1,0 +1,11 @@
+[phases.setup]
+nixPkgs = [
+  "nodejs-20_x",
+  "fontconfig",
+  "dejavu_fonts",
+  "noto-fonts",
+  "noto-fonts-emoji"
+]
+
+[start]
+cmd = "npm run bot"
