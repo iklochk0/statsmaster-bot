@@ -1,5 +1,6 @@
 [phases.setup]
 nixPkgs = [
+  "nodejs_20",
   "fontconfig",
   "dejavu_fonts",
   "noto-fonts",
