@@ -94,11 +94,11 @@ function checkCooldown(userId){
 // Help (EN)
 const HELP_PUBLIC = [
   "**Public commands:**",
-  "`!stats <player_id>` — PNG stats card",
-  "`!me` — my PNG stats card (after `!link`)",
-  "`!link <player_id>` — link yourself",
-  "`!unlink` — unbind",
-  "`!help` — show this help",
+  "`!stats <player_id>` — show a stats card for any player by ID",
+  "`!me` — show **your** stats card (works only after `!link`)",
+  "`!link <player_id>` — connect your Discord account with your in-game player ID",
+  "`!unlink` — remove the link between your Discord and player ID",
+  "`!help` — show this list of public commands",
 ].join("\n");
 
 const HELP_ADMIN = [
