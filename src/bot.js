@@ -487,6 +487,16 @@ client.on("messageCreate", async (msg) => {
     if (msg.author.bot) return;
     if (!msg.content.startsWith("!")) return;
 
+    const ALLOWED_CHANNEL_ID = process.env.ALLOWED_CHANNEL_ID;
+    if (ALLOWED_CHANNEL_ID && msg.channel.id !== ALLOWED_CHANNEL_ID) {
+      const allowedChannel = await client.channels.fetch(ALLOWED_CHANNEL_ID).catch(() => null);
+      if (allowedChannel) {
+        return void msg.reply(`⚠️ Цей бот доступний тільки в ${allowedChannel}.`);
+      } else {
+        return void msg.reply("⚠️ Цей бот доступний тільки в визначеному каналі.");
+      }
+    }
+
     const began = Date.now();
     const [cmd, ...args] = msg.content.slice(1).trim().split(/\s+/);
     log.info({ ...baseCtx(msg), cmd, args });
