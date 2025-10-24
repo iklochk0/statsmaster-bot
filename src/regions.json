@@ -15,11 +15,36 @@
     {
       "name": "mid",
       "rois": {
-        "t5": { "left": 730, "top": 476, "width": 110, "height": 30 },
-        "t4": { "left": 730, "top": 440, "width": 153, "height": 30 },
-        "t3": { "left": 730, "top": 403, "width": 149, "height": 30 },
-        "t2": { "left": 730, "top": 368, "width": 145, "height": 30 },
-        "t1": { "left": 730, "top": 330, "width": 146, "height": 30 }
+  "t5": {
+    "left": 730,
+    "top": 471,
+    "width": 151,
+    "height": 30
+  },
+  "t4": {
+    "left": 731,
+    "top": 435,
+    "width": 147,
+    "height": 30
+  },
+  "t3": {
+    "left": 735,
+    "top": 399,
+    "width": 128,
+    "height": 31
+  },
+  "t2": {
+    "left": 733,
+    "top": 367,
+    "width": 131,
+    "height": 27
+  },
+  "t1": {
+    "left": 731,
+    "top": 331,
+    "width": 132,
+    "height": 27
+  }
       },
       "nav": { "type": "tap", "rect": { "left": 155, "top": 555, "width": 40, "height": 45 }, "durMs": 300 }
     },
