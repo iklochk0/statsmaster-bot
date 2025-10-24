@@ -10,6 +10,17 @@ const num = (s) => {
 };
 
 export function parseStats(texts) {
+  const kills = {
+    t1: num(texts.t1),
+    t2: num(texts.t2),
+    t3: num(texts.t3),
+    t4: num(texts.t4),
+    t5: num(texts.t5),
+  };
+
+  // сума всіх T1–T5
+  const kills_total = kills.t4 + kills.t5;
+
   return {
     // ID беремо з різних можливих ключів, на всякий випадок
     id: num(texts.id ?? texts.player_id ?? texts.playerId),
@@ -17,15 +28,8 @@ export function parseStats(texts) {
     name: (texts.name ?? "").replace(/\s+/g, " ").trim(),
 
     power: num(texts.power),
-    kp:    num(texts.kp ?? texts.killpoints ?? texts.kill_points),
+    kills_total, // нове поле для БД
+    kills,       // збережемо і деталізацію
     dead:  num(texts.dead ?? texts.deads ?? texts.deaths),
-
-    kills: {
-      t1: num(texts.t1),
-      t2: num(texts.t2),
-      t3: num(texts.t3),
-      t4: num(texts.t4),
-      t5: num(texts.t5),
-    },
   };
 }

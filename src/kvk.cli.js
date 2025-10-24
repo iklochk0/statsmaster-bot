@@ -1,21 +1,23 @@
 // src/kvk.cli.js — простий CLI для KvK
 import "dotenv/config";
-import { initSchema, closeDb,
+import {
+  initSchema, closeDb,
   kvkStart, kvkSetWeight, kvkActiveId,
-  kvkEnsureGoal, kvkTop, kvkProgress } from "./db.pg.js";
+  kvkEnsureGoal, kvkTop, kvkProgress
+} from "./db.pg.js";
 
 function usage() {
   console.log(`
 Usage:
   node src/kvk.cli.js start [name]           # старт нового KvK періоду
-  node src/kvk.cli.js weight kp <value>      # виставити вагу KP (напр. 1.0)
+  node src/kvk.cli.js weight kills <value>   # виставити вагу kills (напр. 1.0)
   node src/kvk.cli.js weight dead <value>    # виставити вагу dead→DKP (напр. 5)
   node src/kvk.cli.js ensure <player_id>     # створити ціль для гравця (якщо нема)
   node src/kvk.cli.js progress <player_id>   # показати прогрес гравця
   node src/kvk.cli.js top [N]                # топ N за % до цілі
 `);}
 
-async function main(){
+async function main() {
   await initSchema();
   const [cmd, a1, a2] = process.argv.slice(2);
 
@@ -26,7 +28,7 @@ async function main(){
       break;
     }
     case "weight": {
-      if (!["kp","dead"].includes(a1)) { usage(); break; }
+      if (!["kills", "dead"].includes(a1)) { usage(); break; }
       const val = Number(a2);
       if (!Number.isFinite(val)) { usage(); break; }
       await kvkSetWeight(a1, val);
@@ -53,7 +55,12 @@ async function main(){
     }
     default: usage();
   }
+
   await closeDb();
 }
 
-main().catch(async e => { console.error(e); await closeDb().catch(()=>{}); process.exit(1); });
+main().catch(async e => {
+  console.error(e);
+  await closeDb().catch(() => {});
+  process.exit(1);
+});
