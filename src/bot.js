@@ -1,5 +1,5 @@
-// src/bot.js — Discord bot with modern PNG stats (3 stripes), deltas, caching, logging, PNG leaderboard, and admin gating by role IDs.
-// UI texts: EN; code comments: UKR
+// src/bot.js — Discord bot with PNG stats (zones-aware), deltas, caching, logging, PNG leaderboard, and admin gating by role IDs.
+// UI texts: EN; code comments: UKR (адаптовано під kills + зони)
 
 import "dotenv/config";
 import { Client, GatewayIntentBits, AttachmentBuilder, PermissionsBitField } from "discord.js";
@@ -11,27 +11,24 @@ import {
   kvkStart,
   kvkSetWeight,
   kvkEnsureGoal,
-  kvkProgress,
+  kvkProgress,   // лишаємо для сумісності інших cmd
   kvkTop,
   kvkActiveId,
+  listZones,
+  getZone,
 } from "./db.pg.js";
 
 /* ───────────────────────── env / constants ───────────────────────── */
-// адмiн-ролi через .env (comma-separated)
 const ADMIN_ROLE_IDS = String(process.env.ADMIN_ROLE_IDS || "")
   .split(",").map(s => s.trim()).filter(Boolean);
 
-// опцiйний канал для репортингу помилок (ID)
 const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID || "";
 
-// кеш картинок: TTL (сек) i максимум ел.
 const IMG_CACHE_TTL_S = Number(process.env.IMG_CACHE_TTL_S || 60);
 const IMG_CACHE_MAX   = Number(process.env.IMG_CACHE_MAX || 120);
 
-// тротлiнг для важких команд (сек/користувач)
 const HEAVY_CMD_COOLDOWN_S = Number(process.env.HEAVY_CMD_COOLDOWN_S || 4);
 
-// лог-рiвень: debug|info|warn|error
 const LOG_LEVEL = (process.env.LOG_LEVEL || "info").toLowerCase();
 const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
 
@@ -48,7 +45,7 @@ function baseCtx(msg){
 }
 function logAt(level, obj){
   if (LEVELS[level] < (LEVELS[LOG_LEVEL] ?? 20)) return;
-  try { console.log(JSON.stringify({ level, ...obj })); } catch { /* noop */ }
+  try { console.log(JSON.stringify({ level, ...obj })); } catch {}
 }
 const log = {
   debug: (o)=>logAt("debug", o),
@@ -63,14 +60,12 @@ const pct1 = (x) => (Number.isFinite(Number(x)) ? Math.round(Number(x) * 10) / 1
 const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
 const sum = (arr)=>arr.reduce((a,b)=>a+b,0);
 
-// формат/колір дельт
 const GREEN = "#6ee7a8";
 const RED   = "#ef5350";
 const NEUTR = "#a9b4c6";
 const colorDelta = (n) => (n > 0 ? GREEN : n < 0 ? RED : NEUTR);
 const fmtDelta   = (n) => (n > 0 ? `+${nf(n)}` : n < 0 ? `-${nf(Math.abs(n))}` : `±0`);
 
-// перевірка адмін-доступу: спочатку ролі з .env, потім Admin perm fallback
 function isAdmin(msg) {
   const m = msg.member;
   if (!m) return false;
@@ -80,7 +75,6 @@ function isAdmin(msg) {
   return m.permissions?.has(PermissionsBitField.Flags.Administrator) || false;
 }
 
-// простий пер-юзер тротлінг
 const lastHeavyUse = new Map(); // userId -> timestamp(ms)
 function checkCooldown(userId){
   const now = Date.now();
@@ -91,7 +85,7 @@ function checkCooldown(userId){
   return 0;
 }
 
-// Help (EN)
+// Help
 const HELP_PUBLIC = [
   "**Public commands:**",
   "`!stats <player_id>` — show a stats card for any player by ID",
@@ -108,11 +102,11 @@ const HELP_ADMIN = [
   "`!kvk start [name]` — start a new period",
   "`!kvk active` — show active period",
   "`!kvk weight show` — show current DKP weights",
-  "`!kvk weight <dead|kp> <value>` — set DKP weights",
+  "`!kvk weight <dead|kills> <value>` — set DKP weights",
   "`!kvk ensure <player_id>` / `!kvk ensure_all` — create/update goals",
-  "`!kvk stats <player_id>` / `!kvk me` — text progress (diagnostics)",
+  "`!kvk stats <player_id>` / `!kvk me` — **zone-based PNG** progress",
   "`!kvk top [N] [text]` — top by progress % (PNG by default; add `text` for text)",
-  "`!top [kp|power] [N]` — top by latest",
+  "`!top [kills|power] [N]` — top by latest",
 ].join("\n");
 
 /* ───────────────────────── DB ───────────────────────── */
@@ -129,9 +123,10 @@ await pool.query(`
   );
 `);
 
+/* ---- Low-level queries we need for zones ---- */
 async function fetchLatestById(id) {
   const { rows } = await pool.query(
-    `SELECT l.player_id, l.name, l.power, l.kp, l.dead, l.t4, l.t5, l.updated_at
+    `SELECT l.player_id, l.name, l.power, l.kills, l.dead, l.t1, l.t2, l.t3, l.t4, l.t5, l.updated_at
      FROM latest l
      WHERE l.player_id = $1`,
     [id]
@@ -157,8 +152,8 @@ async function removeLink(discordId) {
   await pool.query(`DELETE FROM discord_links WHERE discord_id=$1`, [discordId]);
 }
 
-async function fetchTop(by = "kp", limit = 10) {
-  const col = by === "power" ? "power" : "kp";
+async function fetchTop(by = "kills", limit = 10) {
+  const col = by === "power" ? "power" : "kills";
   const { rows } = await pool.query(
     `SELECT player_id, name, ${col} AS metric
      FROM latest
@@ -170,21 +165,23 @@ async function fetchTop(by = "kp", limit = 10) {
   return rows;
 }
 
-// KvK старт (active kvk) для гравця — для дельт (Power/T4/T5 теж є)
-async function fetchKvKStart(playerId) {
-  const active = await kvkActiveId();
-  if (!active) return null;
+// для зон: витягнути всі stats певного run_id
+async function fetchStatsByRun(runId) {
   const { rows } = await pool.query(
-    `SELECT start_power, start_kp, start_dead, start_t5, start_t4
-     FROM kvk_goals
-     WHERE kvk_id = $1 AND player_id = $2`,
-    [active, playerId]
+    `SELECT s.player_id, p.name,
+            s.power, s.kills, s.dead, s.t1, s.t2, s.t3, s.t4, s.t5
+       FROM stats s
+       JOIN players p ON p.id = s.player_id
+      WHERE s.run_id = $1`,
+    [runId]
   );
-  return rows[0] || null;
+  // map за player_id
+  const m = new Map();
+  for (const r of rows) m.set(String(r.player_id), r);
+  return m;
 }
 
 /* ─────────────────────── PNG card renderer (player) ─────────────────────── */
-// авто-тег за DKP
 function autoTag(pct) {
   const v = Number(pct) || 0;
   if (v >= 170) return "WHALE KILLER";
@@ -194,38 +191,32 @@ function autoTag(pct) {
   return "WARM UP";
 }
 
-// головний SVG (3 смуги KP/Dead/DKP)
+// головний SVG (3 смуги Kills/Dead/DKP)
 function stripeCardSVG(r, latest, deltas) {
   const W = 1100, H = 640;
   const panel = "#0f1218", card = "#121722", grid = "#1e2633", text = "#e6edf7", sub = "#a9b4c6";
   const track = "#2b3342", color1 = "#00c853", color2 = "#7c4dff";
 
-  // %: сирий (для цифри/тега) і обрізаний (для смуги)
   const pctDKP_raw = Number(r?.pct) || 0;
   const pctDKP     = clamp(pctDKP_raw, 0, 220);
-  const pctKP      = clamp(((Number(r?.d_kp)   || 0) / (Number(r?.goal_kp)   || 0)) * 100 || 0, 0, 220);
-  const pctDead    = clamp(((Number(r?.d_dead) || 0) / (Number(r?.goal_dead) || 0)) * 100 || 0, 0, 220);
+  const pctKills   = clamp(((Number(r?.d_kills) || 0) / (Number(r?.goal_kills) || 0)) * 100 || 0, 0, 220);
+  const pctDead    = clamp(((Number(r?.d_dead)  || 0) / (Number(r?.goal_dead)  || 0)) * 100 || 0, 0, 220);
 
-  // LEFT
-  const dkpLeft  = Math.max(0, Number(r?.goal_dkp || 0) - Number(r?.dkp || 0));
-  const kpLeft   = Math.max(0, Number(r?.goal_kp  || 0) - Number(r?.d_kp || 0));
-  const deadLeft = Math.max(0, Number(r?.goal_dead|| 0) - Number(r?.d_dead || 0));
+  const dkpLeft   = Math.max(0, Number(r?.goal_dkp   || 0) - Number(r?.dkp      || 0));
+  const killsLeft = Math.max(0, Number(r?.goal_kills || 0) - Number(r?.d_kills  || 0));
+  const deadLeft  = Math.max(0, Number(r?.goal_dead  || 0) - Number(r?.d_dead   || 0));
 
-  // заголовок
   const title   = latest?.name ? `${latest.name} (${latest.player_id})` : String(latest?.player_id ?? "");
   const updated = latest?.updated_at ? new Date(latest.updated_at) : new Date();
 
-  // геометрія
   const x0 = 50, width = W - 100, hBar = 28, rxy = 14;
   const yBase = 230;
 
-  // відступи та вирівнювачі
-  const GAP = 90;                          // вертикальна відстань між рядами
-  const BAR_LABEL_OFF = -12;               // підпис над смугою
-  const BAR_PCT_OFF   = Math.floor(hBar/2) + 7; // текст % усередині смуги
-  const BAR_NUMS_OFF  = hBar + 40;         // "cur / goal" під смугою
+  const GAP = 90;
+  const BAR_LABEL_OFF = -12;
+  const BAR_PCT_OFF   = Math.floor(hBar/2) + 7;
+  const BAR_NUMS_OFF  = hBar + 40;
 
-  // утиліти для довжин і одного рядка
   function segLengths(pct) {
     return {
       base: (width * Math.min(pct, 100)) / 100,
@@ -248,13 +239,12 @@ function stripeCardSVG(r, latest, deltas) {
     `;
   }
 
-  // дельти і кольори
-  const { dPower=0, dKP=0, dDead=0, dT5=0, dT4=0 } = deltas || {};
-  const cPow  = colorDelta(dPower);
-  const cKPcol = colorDelta(dKP);
-  const cDeadCol = colorDelta(dDead);
-  const cT5   = colorDelta(dT5);
-  const cT4   = colorDelta(dT4);
+  const { dPower=0, dKills=0, dDead=0, dT5=0, dT4=0 } = deltas || {};
+  const cPow   = colorDelta(dPower);
+  const cKills = colorDelta(dKills);
+  const cDead  = colorDelta(dDead);
+  const cT5    = colorDelta(dT5);
+  const cT4    = colorDelta(dT4);
 
   return `
 <svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
@@ -280,21 +270,21 @@ function stripeCardSVG(r, latest, deltas) {
     <text x="${W-50}" y="62" text-anchor="end" class="b">${pct1(pctDKP_raw)}%</text>
     <text x="${W-50}" y="88" text-anchor="end" class="tg">${autoTag(pctDKP_raw)}</text>
 
-    <!-- key metrics + deltas -->
+    <!-- key metrics + deltas (ZONE-BASED) -->
     <g transform="translate(50,120)">
       <text class="s">Power</text>
       <text y="24" class="t">${nf(latest?.power)}</text>
       <text y="46" class="m" style="fill:${cPow}">${fmtDelta(dPower)}</text>
     </g>
     <g transform="translate(260,120)">
-      <text class="s">KP</text>
-      <text y="24" class="t">${nf(latest?.kp)}</text>
-      <text y="46" class="m" style="fill:${cKPcol}">${fmtDelta(dKP)}</text>
+      <text class="s">Kills</text>
+      <text y="24" class="t">${nf(latest?.kills)}</text>
+      <text y="46" class="m" style="fill:${cKills}">${fmtDelta(dKills)}</text>
     </g>
     <g transform="translate(470,120)">
       <text class="s">Dead</text>
       <text y="24" class="t">${nf(latest?.dead)}</text>
-      <text y="46" class="m" style="fill:${cDeadCol}">${fmtDelta(dDead)}</text>
+      <text y="46" class="m" style="fill:${cDead}">${fmtDelta(dDead)}</text>
     </g>
     <g transform="translate(680,120)">
       <text class="s">T5</text>
@@ -307,21 +297,21 @@ function stripeCardSVG(r, latest, deltas) {
       <text y="46" class="m" style="fill:${cT4}">${fmtDelta(dT4)}</text>
     </g>
 
-    <!-- ===== 3 stripes: KP / Dead / DKP ===== -->
-    ${barRow({ label: "KP",   pct: pctKP,   cur: r?.d_kp   || 0, goal: r?.goal_kp   || 0, y: yBase })}
-    ${barRow({ label: "Dead", pct: pctDead, cur: r?.d_dead || 0, goal: r?.goal_dead || 0, y: yBase + GAP })}
-    ${barRow({ label: "DKP",  pct: pctDKP,  cur: r?.dkp    || 0, goal: r?.goal_dkp  || 0, y: yBase + GAP*2 })}
+    <!-- ===== 3 stripes: Kills / Dead / DKP ===== -->
+    ${barRow({ label: "Kills", pct: pctKills, cur: r?.d_kills || 0, goal: r?.goal_kills || 0, y: yBase })}
+    ${barRow({ label: "Dead",  pct: pctDead,  cur: r?.d_dead  || 0, goal: r?.goal_dead  || 0, y: yBase + GAP })}
+    ${barRow({ label: "DKP",   pct: pctDKP,   cur: r?.dkp     || 0, goal: r?.goal_dkp   || 0, y: yBase + GAP*2 })}
 
     <!-- Панелі під DKP -->
     <g transform="translate(${x0}, ${yBase + GAP*2 + BAR_NUMS_OFF + 24})">
-      <rect x="-12" y="18" width="460" height="50" rx="10" fill="${track}"/>
+      <rect x="-12" y="18" width="520" height="50" rx="10" fill="${track}"/>
       <text x="0" y="10" class="s">LEFT</text>
-      <text x="0" y="48" class="m">KP ${nf(kpLeft)} • Dead ${nf(deadLeft)}</text>
+      <text x="0" y="48" class="m">Kills ${nf(killsLeft)} • Dead ${nf(deadLeft)}</text>
     </g>
-    <g transform="translate(${x0+500}, ${yBase + GAP*2 + BAR_NUMS_OFF + 24})">
+    <g transform="translate(${x0+560}, ${yBase + GAP*2 + BAR_NUMS_OFF + 24})">
       <rect x="-12" y="18" width="360" height="50" rx="10" fill="${track}"/>
-      <text x="0" y="10" class="s">Δ FROM START</text>
-      <text x="0" y="48" class="m">KP ${nf(r?.d_kp)} • Dead ${nf(r?.d_dead)}</text>
+      <text x="0" y="10" class="s">SUM of ZONES</text>
+      <text x="0" y="48" class="m">Kills ${nf(r?.d_kills)} • Dead ${nf(r?.d_dead)}</text>
     </g>
   </g>
 </svg>`;
@@ -333,39 +323,34 @@ async function renderStripeCard(r, latest, deltas) {
 }
 
 /* ─────────────────────── PNG leaderboard (KvK top) ─────────────────────── */
-// рендеримо PNG-лідборд з 1 смугою DKP на рядок
 function hashTopRows(rows){
   const s = rows.map(r => `${r.player_id}:${r.dkp}:${r.goal_dkp}:${r.pct}`).join("|");
   return createHash("md5").update(s).digest("hex").slice(0,12);
 }
 
-// ── KvK Top: SVG генератор
 function kvkTopSVG(rows, meta = {}) {
-  // базові кольори та розміри (узгоджені з карткою)
-  const W = 1100, H = 120 + rows.length * 56 + 40;    // висота від кількості рядків
+  const W = 1100, H = 120 + rows.length * 56 + 40;
   const panel = "#0f1218", card = "#121722", grid = "#1e2633", text = "#e6edf7", sub = "#a9b4c6";
-  const track = "#2b3342", color1 = "#7c4dff";         // фіолет для прогрес-бару
+  const track = "#2b3342", color1 = "#7c4dff";
 
   const marginX = 40;
-  const listLeft = marginX + 12;                       // номер + ім’я
-  const barLeft  = 250;                                // старт X смужок
-  const barWidth = W - barLeft - 85;                   // ширина смужок
-  const padRight = 46;                                 // відступ справа, щоб % не накладався
-  const hBar = 20;                                     // тонша смужка
+  const listLeft = marginX + 12;
+  const barLeft  = 250;
+  const barWidth = W - barLeft - 85;
+  const padRight = 46;
+  const hBar = 20;
   const rxy  = 7;
-  const rowGap = 56;                                   // вертикальний крок між рядками
+  const rowGap = 56;
   const yStart = 120;
 
   const title = meta.title ?? `KvK Top ${rows.length}`;
-  //const sublineL = `Active: ${meta.active ?? "?"}`;
   const sublineR = `Updated: ${meta.updated ?? "-"}`;
 
   let lines = "";
-
   rows.forEach((r, i) => {
     const y = yStart + i * rowGap;
-    const pct = Math.max(0, Number(r.pct) || 0);                 // фактичний %
-    const pctClamped = Math.min(100, pct);                       // малюємо до 100, решту не показуємо (це ТОП-таблиця)
+    const pct = Math.max(0, Number(r.pct) || 0);
+    const pctClamped = Math.min(100, pct);
     const barLen = (barWidth - padRight) * (pctClamped / 100);
     const name = trimName(r.name ?? r.player_id, 26);
     const rank = `${i + 1}.`;
@@ -379,9 +364,7 @@ function kvkTopSVG(rows, meta = {}) {
         <rect x="${barLeft}" y="${y}" width="${barWidth}" height="${hBar}" rx="${rxy}" fill="${track}"/>
         <rect x="${barLeft}" y="${y}" width="${barLen}" height="${hBar}" rx="${rxy}" fill="${color1}"/>
 
-        <!-- DKP лічильник під смужкою -->
         <text x="${barLeft}" y="${y + 35}" class="m">${dkpText}</text>
-        <!-- % справа від смужки, з відступом -->
         <text x="${barLeft + barWidth - padRight/2}" y="${y + 35}" text-anchor="end" class="m">${pct1(pct)}%</text>
       </g>`;
   });
@@ -397,7 +380,7 @@ function kvkTopSVG(rows, meta = {}) {
     </style>
   </defs>
 
-  <rect width="${W}" height="${H}" fill="${panel}"/>
+  <rect width="${W}" height="${H}" fill="#0f1218"/>
   <g>
     <rect x="20" y="20" width="${W-40}" height="${H-40}" rx="22" fill="${card}" stroke="${grid}" stroke-width="1"/>
 
@@ -409,17 +392,15 @@ function kvkTopSVG(rows, meta = {}) {
 </svg>`;
 }
 
-// PNG-обгортка
 async function renderKvkTopPNG(rows, meta) {
   const svg = kvkTopSVG(rows, meta);
   return await sharp(Buffer.from(svg, "utf8")).png().toBuffer();
 }
 
 /* ─────────────────────── simple PNG cache ─────────────────────── */
-/* Кеш PNG для player і для лідборду */
 const imgCache = new Map(); // key -> { buf, t }
 function cacheKeyPlayer(pid, r, latest){
-  return `p:${pid}:${r?.dkp}|${r?.goal_dkp}|${r?.d_kp}|${r?.d_dead}|${latest?.updated_at ?? ""}`;
+  return `p:${pid}:${r?.dkp}|${r?.goal_dkp}|${r?.d_kills}|${r?.d_dead}|${latest?.updated_at ?? ""}`;
 }
 function cacheKeyTop(limit, activeId, rows){
   const h = hashTopRows(rows);
@@ -433,7 +414,6 @@ function getCached(key){
 }
 function setCached(key, buf){
   if (imgCache.size >= IMG_CACHE_MAX) {
-    // просте LRU-ish: видаляємо найстаріший
     const firstKey = imgCache.keys().next().value;
     if (firstKey) imgCache.delete(firstKey);
   }
@@ -458,29 +438,94 @@ function parsePlayerId(arg) {
   if (!arg || !/^\d+$/.test(arg)) return null;
   try { return BigInt(arg); } catch { return null; }
 }
-
-async function getKvkBundle(playerIdBigInt, latest){
-  // KvK progress (DKP + goals)
-  let r = await kvkProgress(playerIdBigInt).catch(()=>null);
-  if (!r) r = { pct: 0, dkp: 0, goal_dkp: 0, d_kp: 0, d_dead: 0, goal_kp: 0, goal_dead: 0 };
-
-  // KvK start snapshot → дельти під метриками
-  let start = await fetchKvKStart(playerIdBigInt).catch(()=>null);
-  const deltas = {
-    dPower: start?.start_power != null ? Number(latest.power || 0) - Number(start.start_power || 0) : 0,
-    dKP:    start?.start_kp    != null ? Number(latest.kp    || 0) - Number(start.start_kp    || 0) : 0,
-    dDead:  start?.start_dead  != null ? Number(latest.dead  || 0) - Number(start.start_dead  || 0) : 0,
-    dT5:    start?.start_t5    != null ? Number(latest.t5    || 0) - Number(start.start_t5    || 0) : 0,
-    dT4:    start?.start_t4    != null ? Number(latest.t4    || 0) - Number(start.start_t4    || 0) : 0,
-  };
-  return { r, deltas };
-}
-// ── KvK Top helpers (UKR коменти)
-// обрізати довгі ніки, щоб не з’їдали розмітку
 function trimName(s = "", max = 22) {
   s = String(s || "");
   return s.length > max ? s.slice(0, max - 1) + "…" : s;
 }
+
+/* ─────────────────────── ZONE DELTAS (core) ─────────────────────── */
+// по одному гравцю: сума зон (дельти end-start), повертає об'єкт з усіма Δ
+async function computeZoneSumForPlayer(playerId) {
+  const zones = await listZones();
+  let dPower = 0, dKills = 0, dDead = 0, dT1=0,dT2=0,dT3=0,dT4=0,dT5=0;
+
+  for (const z of zones) {
+    const full = await getZone(z.zone_number);
+    const startRunId = Number(full?.start_scan_data?.run_id ?? full?.start_scan_data?.["run_id"]);
+    const endRunId   = Number(full?.end_scan_data?.run_id   ?? full?.end_scan_data?.["run_id"]);
+    if (!Number.isFinite(startRunId) || !Number.isFinite(endRunId)) continue;
+
+    const startMap = await fetchStatsByRun(startRunId);
+    const endMap   = await fetchStatsByRun(endRunId);
+
+    const s = startMap.get(String(playerId));
+    const e = endMap.get(String(playerId));
+    if (!s || !e) continue;
+
+    dPower += Math.max(0, Number(e.power||0) - Number(s.power||0));
+    dKills += Math.max(0, Number(e.kills||0) - Number(s.kills||0));
+    dDead  += Math.max(0, Number(e.dead ||0) - Number(s.dead ||0));
+    dT1    += Math.max(0, Number(e.t1   ||0) - Number(s.t1   ||0));
+    dT2    += Math.max(0, Number(e.t2   ||0) - Number(s.t2   ||0));
+    dT3    += Math.max(0, Number(e.t3   ||0) - Number(s.t3   ||0));
+    dT4    += Math.max(0, Number(e.t4   ||0) - Number(s.t4   ||0));
+    dT5    += Math.max(0, Number(e.t5   ||0) - Number(s.t5   ||0));
+  }
+
+  return { dPower, dKills, dDead, dT1, dT2, dT3, dT4, dT5 };
+}
+
+// для картки: зібрати goals/config і порахувати DKP/PCT на основі zone-sum
+async function buildZoneBasedKvkBundle(playerIdBigInt, latest) {
+  const active = await kvkActiveId();
+  let goal = null, cfg = { kills_weight: 1.0, dead_to_kills: 5.0 };
+
+  if (active) {
+    const { rows: gRows } = await pool.query(
+      `SELECT goal_kills, goal_dead, goal_dkp FROM kvk_goals WHERE kvk_id=$1 AND player_id=$2`,
+      [active, playerIdBigInt]
+    );
+    goal = gRows[0] || null;
+
+    const { rows: cRows } = await pool.query(
+      `SELECT kills_weight, dead_to_kills FROM kvk_config WHERE kvk_id=$1`,
+      [active]
+    );
+    if (cRows[0]) cfg = cRows[0];
+  }
+
+  // Δ по всіх зонах
+  const deltas = await computeZoneSumForPlayer(playerIdBigInt);
+
+  // розрахунок DKP за зонами
+  const dkp = Math.round(
+    (Number(cfg.kills_weight||0) * Number(deltas.dKills||0)) +
+    (Number(cfg.dead_to_kills||0) * Number(deltas.dDead||0))
+  );
+
+  const r = {
+    // синтетичний "kvk_progress" під зони:
+    d_kills: Number(deltas.dKills||0),
+    d_dead : Number(deltas.dDead||0),
+    dkp,
+    goal_kills: Number(goal?.goal_kills || 0),
+    goal_dead : Number(goal?.goal_dead  || 0),
+    goal_dkp  : Number(goal?.goal_dkp   || 0),
+    pct: (Number(goal?.goal_dkp||0) > 0) ? (100 * dkp / Number(goal.goal_dkp)) : 0
+  };
+
+  // дельти для верхніх метрик картки
+  const topDeltas = {
+    dPower: Number(deltas.dPower||0),
+    dKills: Number(deltas.dKills||0),
+    dDead : Number(deltas.dDead ||0),
+    dT5   : Number(deltas.dT5   ||0),
+    dT4   : Number(deltas.dT4   ||0),
+  };
+
+  return { r, deltas: topDeltas };
+}
+
 /* ─────────────────────── commands ─────────────────────── */
 client.on("messageCreate", async (msg) => {
   try {
@@ -507,16 +552,15 @@ client.on("messageCreate", async (msg) => {
       const idArg = args[0];
       if (!idArg || !/^\d+$/.test(idArg)) return void msg.reply("Usage: `!stats <player_id>`");
 
-      // тротлінг
       const cd = checkCooldown(msg.author.id);
       if (cd) return void msg.reply(`Slow down. Try again in ${cd}s.`);
 
       const latest = await fetchLatestById(idArg);
       if (!latest) return void msg.reply("No data yet. Run the scanner first.");
 
-      const { r, deltas } = await getKvkBundle(BigInt(idArg), latest);
+      // Звичайна картка (НЕ KvK): залишаємо існуючу логіку — використовує kvk goals теж
+      const { r, deltas } = await buildZoneBasedKvkBundle(BigInt(idArg), latest);
 
-      // кеш PNG
       const key = cacheKeyPlayer(idArg, r, latest);
       let png = getCached(key);
       if (!png) {
@@ -539,7 +583,7 @@ client.on("messageCreate", async (msg) => {
       const latest = await fetchLatestById(linked);
       if (!latest) return void msg.reply("No data for your player_id yet.");
 
-      const { r, deltas } = await getKvkBundle(BigInt(linked), latest);
+      const { r, deltas } = await buildZoneBasedKvkBundle(BigInt(linked), latest);
 
       const key = cacheKeyPlayer(linked, r, latest);
       let png = getCached(key);
@@ -554,7 +598,6 @@ client.on("messageCreate", async (msg) => {
     }
 
     if (cmd === "link") {
-      // якщо не вказали @user → беремо автора
       const mention = msg.mentions.users.first() ?? msg.author;
       const idArg = args[mention === msg.author ? 0 : 1];
 
@@ -562,13 +605,11 @@ client.on("messageCreate", async (msg) => {
         return void msg.reply("Usage: `!link [@user] <player_id>`");
       }
 
-      // перевіряємо чи існує такий player_id у players
       const { rows } = await pool.query(`SELECT 1 FROM players WHERE id=$1 LIMIT 1`, [idArg]);
       if (!rows.length) {
         return void msg.reply(`Player_id **${idArg}** does not exist. Ask an admin to check scanner.`);
       }
 
-      // не-адмін може лінкувати тільки себе
       if (!isAdmin(msg) && mention.id !== msg.author.id) {
         return void msg.reply("You can only link yourself. Ask an admin to link others.");
       }
@@ -580,7 +621,6 @@ client.on("messageCreate", async (msg) => {
     if (cmd === "unlink") {
       const mention = msg.mentions.users.first() ?? msg.author;
 
-      // звичайний юзер може тільки сам себе
       if (!isAdmin(msg) && mention.id !== msg.author.id) {
         return void msg.reply("You can only unlink yourself. Ask an admin to unlink others.");
       }
@@ -593,7 +633,6 @@ client.on("messageCreate", async (msg) => {
       await removeLink(mention.id);
       return void msg.reply(`Unlinked ${mention} ⇄ player_id **${playerId}**.`);
     }
-
 
     if (cmd === "help") {
       return void msg.reply(HELP_PUBLIC);
@@ -625,15 +664,15 @@ client.on("messageCreate", async (msg) => {
       if (args[1] && args[1].toLowerCase() === "show") {
         const id = await kvkActiveId();
         if (!id) return void msg.reply("No active period.");
-        const { rows } = await pool.query(`SELECT kp_weight, dead_to_kp FROM kvk_config WHERE kvk_id=$1`, [id]);
+        const { rows } = await pool.query(`SELECT kills_weight, dead_to_kills FROM kvk_config WHERE kvk_id=$1`, [id]);
         if (!rows[0]) return void msg.reply("No weights found for the active period.");
-        const { kp_weight, dead_to_kp } = rows[0];
-        return void msg.reply(`Current weights → KP: **${kp_weight}**, Dead: **${dead_to_kp}**`);
+        const { kills_weight, dead_to_kills } = rows[0];
+        return void msg.reply(`Current weights → Kills: **${kills_weight}**, Dead: **${dead_to_kills}**`);
       }
       const which = (args[1] || "").toLowerCase();
       const val = Number(args[2]);
-      if (!["dead", "kp"].includes(which) || !Number.isFinite(val)) {
-        return void msg.reply("Usage: `!kvk weight <dead|kp> <value>` or `!kvk weight show`");
+      if (!["dead", "kills"].includes(which) || !Number.isFinite(val)) {
+        return void msg.reply("Usage: `!kvk weight <dead|kills> <value>` or `!kvk weight show`");
       }
       await kvkSetWeight(which, val);
       return void msg.reply(`Weight **${which}** set to **${val}**.`);
@@ -644,7 +683,7 @@ client.on("messageCreate", async (msg) => {
       if (pid == null) return void msg.reply("Usage: `!kvk ensure <player_id>`");
       const g = await kvkEnsureGoal(pid);
       if (!g) return void msg.reply("Goal already exists, or no active period/latest.");
-      return void msg.reply(`Goal for **${pid}** → KP ${nf(g.goal_kp)} • Dead ${nf(g.goal_dead)} • DKP ${nf(g.goal_dkp)}`);
+      return void msg.reply(`Goal for **${pid}** → Kills ${nf(g.goal_kills)} • Dead ${nf(g.goal_dead)} • DKP ${nf(g.goal_dkp)}`);
     }
 
     if (cmd === "kvk" && args[0] === "ensure_all") {
@@ -654,30 +693,58 @@ client.on("messageCreate", async (msg) => {
         try {
           const out = await kvkEnsureGoal(BigInt(r.player_id));
           if (out) made++; else skipped++;
-          await new Promise(res => setTimeout(res, 8)); // легкий backoff
+          await new Promise(res => setTimeout(res, 8));
         } catch { skipped++; }
       }
       return void msg.reply(`Goals ensured: **${made}** (skipped: ${skipped}).`);
     }
 
+    // 🔥 ОНОВЛЕНО: kvk stats → картка на основі ZONE deltas
     if (cmd === "kvk" && args[0] === "stats") {
       const pid = parsePlayerId(args[1]);
       if (pid == null) return void msg.reply("Usage: `!kvk stats <player_id>`");
-      const r = await kvkProgress(pid);
-      if (!r) return void msg.reply("No goal/start or no latest for this player.");
-      return void msg.reply(
-        `DKP ${nf(r.dkp)}/${nf(r.goal_dkp)} (${pct1(r.pct)}%) • ΔKP ${nf(r.d_kp)} • ΔDead ${nf(r.d_dead)} • goals: KP ${nf(r.goal_kp)} Dead ${nf(r.goal_dead)}`
-      );
+
+      const cd = checkCooldown(msg.author.id);
+      if (cd) return void msg.reply(`Slow down. Try again in ${cd}s.`);
+
+      const latest = await fetchLatestById(pid);
+      if (!latest) return void msg.reply("No latest data for this player.");
+
+      const { r, deltas } = await buildZoneBasedKvkBundle(pid, latest);
+
+      const key = cacheKeyPlayer(pid, r, latest);
+      let png = getCached(key);
+      if (!png) {
+        png = await renderStripeCard(r, latest, deltas);
+        setCached(key, png);
+      }
+
+      const file = new AttachmentBuilder(png, { name: "kvk_stats.png" });
+      await msg.reply({ files: [file] });
+      return log.info({ ...baseCtx(msg), cmd: "kvk stats", ms: Date.now()-began, ok: true });
     }
 
     if (cmd === "kvk" && args[0] === "me") {
       const linked = await getLinkedPlayerIdOrReply(msg);
       if (!linked) return;
-      const r = await kvkProgress(BigInt(linked));
-      if (!r) return void msg.reply("No goal/start or no latest for your player_id.");
-      return void msg.reply(
-        `DKP ${nf(r.dkp)}/${nf(r.goal_dkp)} (${pct1(r.pct)}%) • ΔKP ${nf(r.d_kp)} • ΔDead ${nf(r.d_dead)} • goals: KP ${nf(r.goal_kp)} Dead ${nf(r.goal_dead)}`
-      );
+
+      const cd = checkCooldown(msg.author.id);
+      if (cd) return void msg.reply(`Slow down. Try again in ${cd}s.`);
+
+      const latest = await fetchLatestById(linked);
+      if (!latest) return void msg.reply("No latest data for your player_id.");
+
+      const { r, deltas } = await buildZoneBasedKvkBundle(BigInt(linked), latest);
+
+      const key = cacheKeyPlayer(linked, r, latest);
+      let png = getCached(key);
+      if (!png) {
+        png = await renderStripeCard(r, latest, deltas);
+        setCached(key, png);
+      }
+
+      const file = new AttachmentBuilder(png, { name: "kvk_stats.png" });
+      return void msg.reply({ files: [file] });
     }
 
     if (cmd === "kvk" && args[0] === "top") {
@@ -693,7 +760,6 @@ client.on("messageCreate", async (msg) => {
         return void msg.reply(lines.join("\n"));
       }
 
-      // графічний рендер
       const meta = {
         title: `KvK Top ${rows.length}`,
         active: (await kvkActiveId()) ?? "–",
@@ -703,7 +769,7 @@ client.on("messageCreate", async (msg) => {
       const key = `kvktop:${limit}:${meta.active}:${rows.map(r => r.player_id+":"+r.dkp+":"+r.goal_dkp).join("|")}`;
       let png = getCached(key);
       if (!png) {
-        png = await renderKvkTopPNG(rows, meta); // ⬅️ тут нова функція з тоншими полосками
+        png = await renderKvkTopPNG(rows, meta);
         setCached(key, png);
       }
       const file = new AttachmentBuilder(png, { name: "kvk_top.png" });
@@ -711,7 +777,7 @@ client.on("messageCreate", async (msg) => {
     }
 
     if (cmd === "top") {
-      const by = (args[0] || "kp").toLowerCase();
+      const by = (args[0] || "kills").toLowerCase();
       const limit = Math.min(Math.max(parseInt(args[1] || "10", 10) || 10, 1), 50);
       const rows = await fetchTop(by, limit);
       if (!rows.length) return void msg.reply("Empty. Run the scanner first.");

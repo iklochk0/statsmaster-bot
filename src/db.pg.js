@@ -1,4 +1,4 @@
-// src/db.pg.js — lean schema + deltas + KvK helpers
+// src/db.js — full version (Scan Bot + KvK + Zone tracking)
 import { Pool } from "pg";
 
 const pool = new Pool({
@@ -23,10 +23,10 @@ export async function initSchema() {
       run_id    BIGINT  NOT NULL REFERENCES runs(run_id)    ON DELETE CASCADE,
       player_id BIGINT  NOT NULL REFERENCES players(id)     ON DELETE CASCADE,
       power     BIGINT,
-      kp        BIGINT,
+      kills     BIGINT,
       dead      BIGINT,
       t1 BIGINT, t2 BIGINT, t3 BIGINT, t4 BIGINT, t5 BIGINT,
-      dkp REAL,                -- моментний DkP (якщо хочеш зберігати)
+      dkp REAL,
       PRIMARY KEY (run_id, player_id)
     );
 
@@ -34,21 +34,27 @@ export async function initSchema() {
       player_id  BIGINT PRIMARY KEY REFERENCES players(id) ON DELETE CASCADE,
       name       TEXT,
       updated_at timestamptz NOT NULL,
-      power BIGINT, kp BIGINT, dead BIGINT,
+      power BIGINT, kills BIGINT, dead BIGINT,
       t1 BIGINT, t2 BIGINT, t3 BIGINT, t4 BIGINT, t5 BIGINT
     );
 
-    -- [optional: cursor] якщо не користуєшся — можна видалити таблицю і функції нижче
     CREATE TABLE IF NOT EXISTS cursor (
       run_id  BIGINT PRIMARY KEY REFERENCES runs(run_id) ON DELETE CASCADE,
       stage   TEXT,
       idx     INTEGER,
       updated_at timestamptz NOT NULL
     );
-  `);
 
-  // -------- KvK layer (легкий) --------
-  await pool.query(`
+    -- Zone scans (початок / кінець боїв)
+    CREATE TABLE IF NOT EXISTS zone_scans (
+      id SERIAL PRIMARY KEY,
+      zone_number INT NOT NULL,
+      start_scan_time timestamptz,
+      end_scan_time timestamptz,
+      start_scan_data JSONB,
+      end_scan_data JSONB
+    );
+
     CREATE TABLE IF NOT EXISTS kvk_periods (
       kvk_id BIGSERIAL PRIMARY KEY,
       name TEXT NOT NULL,
@@ -58,18 +64,18 @@ export async function initSchema() {
 
     CREATE TABLE IF NOT EXISTS kvk_config (
       kvk_id BIGINT PRIMARY KEY REFERENCES kvk_periods(kvk_id) ON DELETE CASCADE,
-      kp_weight   NUMERIC NOT NULL DEFAULT 1.0,
-      dead_to_kp  NUMERIC NOT NULL DEFAULT 5.0
+      kills_weight   NUMERIC NOT NULL DEFAULT 1.0,
+      dead_to_kills  NUMERIC NOT NULL DEFAULT 5.0
     );
 
     CREATE TABLE IF NOT EXISTS kvk_goals (
       kvk_id    BIGINT NOT NULL REFERENCES kvk_periods(kvk_id) ON DELETE CASCADE,
       player_id BIGINT NOT NULL REFERENCES players(id) ON DELETE CASCADE,
-      goal_kp   BIGINT NOT NULL,
-      goal_dead BIGINT NOT NULL,
-      goal_dkp  BIGINT NOT NULL,
+      goal_kills BIGINT NOT NULL,
+      goal_dead  BIGINT NOT NULL,
+      goal_dkp   BIGINT NOT NULL,
       start_power BIGINT NOT NULL,
-      start_kp    BIGINT NOT NULL,
+      start_kills BIGINT NOT NULL,
       start_dead  BIGINT NOT NULL,
       start_t1 BIGINT NOT NULL,
       start_t2 BIGINT NOT NULL,
@@ -89,16 +95,16 @@ export async function initSchema() {
       g.player_id,
       p.name,
       l.updated_at,
-      GREATEST(l.kp   - g.start_kp,   0) AS d_kp,
-      GREATEST(l.dead - g.start_dead, 0) AS d_dead,
-      c.kp_weight,
-      c.dead_to_kp,
-      (GREATEST(l.kp - g.start_kp,0) * c.kp_weight
-      +GREATEST(l.dead - g.start_dead,0) * c.dead_to_kp)::bigint AS dkp,
-      g.goal_kp, g.goal_dead, g.goal_dkp,
+      GREATEST(l.kills - g.start_kills, 0) AS d_kills,
+      GREATEST(l.dead  - g.start_dead,  0) AS d_dead,
+      c.kills_weight,
+      c.dead_to_kills,
+      (GREATEST(l.kills - g.start_kills,0) * c.kills_weight
+      +GREATEST(l.dead  - g.start_dead,0)  * c.dead_to_kills)::bigint AS dkp,
+      g.goal_kills, g.goal_dead, g.goal_dkp,
       CASE WHEN g.goal_dkp > 0 THEN ROUND(100.0 *
-        ((GREATEST(l.kp - g.start_kp,0) * c.kp_weight
-        + GREATEST(l.dead - g.start_dead,0) * c.dead_to_kp) / g.goal_dkp), 1)
+        ((GREATEST(l.kills - g.start_kills,0) * c.kills_weight
+        + GREATEST(l.dead - g.start_dead,0) * c.dead_to_kills) / g.goal_dkp), 1)
       ELSE 0 END AS pct
     FROM kvk_goals g
     JOIN latest l ON l.player_id = g.player_id
@@ -112,6 +118,7 @@ export async function initSchema() {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_latest_upd   ON latest(updated_at DESC);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_kvk_goals_player ON kvk_goals(player_id);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_kvk_goals_kvk    ON kvk_goals(kvk_id);`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_zone_number ON zone_scans(zone_number);`);
 }
 
 // ---------------- Base ops ----------------
@@ -136,11 +143,11 @@ export async function upsertPlayer({ id, name }) {
 
 export async function insertStats(run_id, player_id, s) {
   await pool.query(
-    `INSERT INTO stats (run_id, player_id, power, kp, dead, t1, t2, t3, t4, t5, dkp)
+    `INSERT INTO stats (run_id, player_id, power, kills, dead, t1, t2, t3, t4, t5, dkp)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
      ON CONFLICT (run_id, player_id) DO UPDATE SET
        power = EXCLUDED.power,
-       kp    = EXCLUDED.kp,
+       kills = EXCLUDED.kills,
        dead  = EXCLUDED.dead,
        t1    = EXCLUDED.t1,
        t2    = EXCLUDED.t2,
@@ -150,29 +157,29 @@ export async function insertStats(run_id, player_id, s) {
        dkp   = COALESCE(EXCLUDED.dkp, stats.dkp)`,
     [
       run_id, player_id,
-      s.power ?? null, s.kp ?? null, s.dead ?? null,
+      s.power ?? null, s.kills ?? null, s.dead ?? null,
       s.kills?.t1 ?? null, s.kills?.t2 ?? null, s.kills?.t3 ?? null, s.kills?.t4 ?? null, s.kills?.t5 ?? null,
       s.dkp ?? null
     ]
   );
 
   await pool.query(
-    `INSERT INTO latest (player_id, name, updated_at, power, kp, dead, t1, t2, t3, t4, t5)
+    `INSERT INTO latest (player_id, name, updated_at, power, kills, dead, t1, t2, t3, t4, t5)
      VALUES ($1,$2, now(), $3,$4,$5,$6,$7,$8,$9,$10)
      ON CONFLICT (player_id) DO UPDATE SET
        name       = EXCLUDED.name,
        updated_at = EXCLUDED.updated_at,
-       power = EXCLUDED.power, kp = EXCLUDED.kp, dead = EXCLUDED.dead,
+       power = EXCLUDED.power, kills = EXCLUDED.kills, dead = EXCLUDED.dead,
        t1 = EXCLUDED.t1, t2 = EXCLUDED.t2, t3 = EXCLUDED.t3, t4 = EXCLUDED.t4, t5 = EXCLUDED.t5`,
     [
       player_id, (s.name ?? null),
-      s.power ?? null, s.kp ?? null, s.dead ?? null,
+      s.power ?? null, s.kills ?? null, s.dead ?? null,
       s.kills?.t1 ?? null, s.kills?.t2 ?? null, s.kills?.t3 ?? null, s.kills?.t4 ?? null, s.kills?.t5 ?? null
     ]
   );
 }
 
-// [optional: cursor] — якщо не користуєшся, можеш видалити ці дві
+// Cursor (optional)
 export async function saveCursor(run_id, stage, idx) {
   await pool.query(
     `INSERT INTO cursor (run_id, stage, idx, updated_at)
@@ -199,7 +206,7 @@ export async function kvkStart(name = null) {
     [name || `KvK ${new Date().toISOString().slice(0,10)}`]
   );
   const kvk_id = rows[0].kvk_id;
-  await pool.query(`INSERT INTO kvk_config(kvk_id) VALUES ($1)`, [kvk_id]); // дефолтні ваги
+  await pool.query(`INSERT INTO kvk_config(kvk_id) VALUES ($1)`, [kvk_id]);
   return kvk_id;
 }
 
@@ -213,10 +220,10 @@ export async function kvkActiveId() {
 }
 
 export async function kvkSetWeight(which, value, kvk_id = null) {
-  const col = which === "dead" ? "dead_to_kp"
-            : which === "kp"   ? "kp_weight"
+  const col = which === "dead" ? "dead_to_kills"
+            : which === "kills" ? "kills_weight"
             : null;
-  if (!col) throw new Error(`Unknown weight "${which}" (use "dead" or "kp")`);
+  if (!col) throw new Error(`Unknown weight "${which}" (use "dead" or "kills")`);
   if (!kvk_id) kvk_id = await kvkActiveId();
   if (!kvk_id) throw new Error("No active KvK. Run kvkStart first.");
   await pool.query(`UPDATE kvk_config SET ${col}=$1 WHERE kvk_id=$2`, [Number(value), kvk_id]);
@@ -224,7 +231,7 @@ export async function kvkSetWeight(which, value, kvk_id = null) {
 
 export async function kvkEnsureGoal(player_id) {
   const kvk_id = await kvkActiveId();
-  if (!kvk_id) return null; // KvK ще не стартував
+  if (!kvk_id) return null;
 
   const { rows } = await pool.query(
     `SELECT 1 FROM kvk_goals WHERE kvk_id=$1 AND player_id=$2`,
@@ -232,36 +239,34 @@ export async function kvkEnsureGoal(player_id) {
   );
   if (rows.length) return null;
 
-  // стартові значення з latest
   const { rows: lrows } = await pool.query(
     `SELECT * FROM latest WHERE player_id=$1`, [player_id]
   );
-  if (!lrows.length) return null; // ще не сканували цього гравця
+  if (!lrows.length) return null;
   const l = lrows[0];
 
   const { rows: cr } = await pool.query(
-    `SELECT kp_weight, dead_to_kp FROM kvk_config WHERE kvk_id=$1`, [kvk_id]
+    `SELECT kills_weight, dead_to_kills FROM kvk_config WHERE kvk_id=$1`, [kvk_id]
   );
   const cfg = cr[0];
 
-  // прості автогоали (можеш відрегулювати формули)
-  const goal_kp   = Math.round(2.2 * Number(l.power || 0));
-  const goal_dead = Math.round(Number(l.power || 0) / 87);
-  const goal_dkp  = Math.round(cfg.kp_weight * goal_kp + cfg.dead_to_kp * goal_dead);
+  const goal_kills = Math.round(2.2 * Number(l.power || 0));
+  const goal_dead  = Math.round(Number(l.power || 0) / 87);
+  const goal_dkp   = Math.round(cfg.kills_weight * goal_kills + cfg.dead_to_kills * goal_dead);
 
   await pool.query(`
     INSERT INTO kvk_goals
-      (kvk_id, player_id, goal_kp, goal_dead, goal_dkp,
-       start_power, start_kp, start_dead, start_t1, start_t2, start_t3, start_t4, start_t5)
+      (kvk_id, player_id, goal_kills, goal_dead, goal_dkp,
+       start_power, start_kills, start_dead, start_t1, start_t2, start_t3, start_t4, start_t5)
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
     ON CONFLICT (kvk_id, player_id) DO UPDATE SET
-      goal_kp=EXCLUDED.goal_kp, goal_dead=EXCLUDED.goal_dead, goal_dkp=EXCLUDED.goal_dkp
+      goal_kills=EXCLUDED.goal_kills, goal_dead=EXCLUDED.goal_dead, goal_dkp=EXCLUDED.goal_dkp
   `, [
-    kvk_id, player_id, goal_kp, goal_dead, goal_dkp,
-    l.power||0, l.kp||0, l.dead||0, l.t1||0, l.t2||0, l.t3||0, l.t4||0, l.t5||0
+    kvk_id, player_id, goal_kills, goal_dead, goal_dkp,
+    l.power||0, l.kills||0, l.dead||0, l.t1||0, l.t2||0, l.t3||0, l.t4||0, l.t5||0
   ]);
 
-  return { kvk_id, goal_kp, goal_dead, goal_dkp };
+  return { kvk_id, goal_kills, goal_dead, goal_dkp };
 }
 
 export async function kvkProgress(player_id) {
@@ -285,11 +290,9 @@ export async function kvkTop(limit = 10) {
 }
 
 // ---------------- Deltas helpers ----------------
-
-// останні N вимірів зі stats (найсвіжіші першими)
 export async function getLastStats(player_id, limit = 2) {
   const { rows } = await pool.query(
-    `SELECT run_id, player_id, power, kp, dead, t1, t2, t3, t4, t5, dkp
+    `SELECT run_id, player_id, power, kills, dead, t1, t2, t3, t4, t5, dkp
        FROM stats
       WHERE player_id=$1
       ORDER BY run_id DESC
@@ -299,13 +302,12 @@ export async function getLastStats(player_id, limit = 2) {
   return rows;
 }
 
-// обчислення дельт latest - previous
 export function computeDeltas(latest, previous) {
   if (!latest || !previous) return null;
   const d = (a, b) => (Number(a || 0) - Number(b || 0));
   return {
     d_power: d(latest.power, previous.power),
-    d_kp:    d(latest.kp,    previous.kp),
+    d_kills: d(latest.kills, previous.kills),
     d_dead:  d(latest.dead,  previous.dead),
     d_t1:    d(latest.t1,    previous.t1),
     d_t2:    d(latest.t2,    previous.t2),
@@ -318,17 +320,49 @@ export function computeDeltas(latest, previous) {
   };
 }
 
-// all-in-one для сканера: insert → ensure goal → progress → deltas
 export async function insertStatsWithKvKAndDeltas(run_id, player_id, s) {
   await insertStats(run_id, player_id, s);
   await kvkEnsureGoal(player_id);
-
-  const progress = await kvkProgress(player_id); // може бути null, якщо KvK ще не стартував
-
+  const progress = await kvkProgress(player_id);
   const last2 = await getLastStats(player_id, 2);
   const latest   = last2[0] || null;
   const previous = last2[1] || null;
   const deltas = computeDeltas(latest, previous);
-
   return { progress, deltas };
+}
+
+// ---------------- Zone helpers ----------------
+export async function zoneStart(zone_number, scan_data = null) {
+  await pool.query(
+    `INSERT INTO zone_scans (zone_number, start_scan_time, start_scan_data)
+     VALUES ($1, now(), $2)
+     ON CONFLICT (zone_number)
+     DO NOTHING`,
+    [zone_number, scan_data ? JSON.stringify(scan_data) : null]
+  );
+}
+
+export async function zoneFinish(zone_number, scan_data = null) {
+  await pool.query(
+    `UPDATE zone_scans
+     SET end_scan_time = now(), end_scan_data = $2
+     WHERE zone_number = $1`,
+    [zone_number, scan_data ? JSON.stringify(scan_data) : null]
+  );
+}
+
+export async function getZone(zone_number) {
+  const { rows } = await pool.query(
+    `SELECT * FROM zone_scans WHERE zone_number=$1`,
+    [zone_number]
+  );
+  return rows[0] || null;
+}
+
+export async function listZones() {
+  const { rows } = await pool.query(
+    `SELECT zone_number, start_scan_time, end_scan_time
+     FROM zone_scans ORDER BY zone_number ASC`
+  );
+  return rows;
 }

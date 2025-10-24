@@ -23,7 +23,12 @@ import {
   insertStats,
   kvkEnsureGoal,
   kvkActiveId,
-  closeDb
+  closeDb,
+  // --- додано для зон ---
+  zoneStart,
+  zoneFinish,
+  getZone,
+  listZones
 } from "./db.pg.js";
 
 /* ===================== Paths & Config ===================== */
@@ -101,6 +106,20 @@ function arg(name, def) {
   return a ? a.split("=", 2)[1] : def;
 }
 const COUNT = Number(arg("count", "40"));
+
+// --- додано: підтримка позиційних zone-команд ---
+const _ARGS = process.argv.slice(2);
+let ZONE_MODE = null; // { number: <int>, mode: "start"|"finish" }
+if (_ARGS[0] === "zone" && _ARGS.length >= 3) {
+  const z = Number(_ARGS[1]);
+  const m = String(_ARGS[2] || "").toLowerCase();
+  if (Number.isFinite(z) && (m === "start" || m === "finish")) {
+    ZONE_MODE = { number: z, mode: m };
+    console.log(`Zone mode: zone ${z} → ${m}`);
+  } else {
+    console.warn(`Zone args ignored (expected: "zone <number> start|finish")`);
+  }
+}
 
 /* ===================== ADB & geometry ===================== */
 function adbArgs(args) {
@@ -281,10 +300,10 @@ async function isProfileScreen() {
   if (idDigits.length >= 5) return true;
 
   const powRaw = rois.power ? (await ocrBuffer(rois.power, DIGITS)).trim() : "";
-  const kpRaw  = rois.kp    ? (await ocrBuffer(rois.kp,    DIGITS)).trim() : "";
+  const killsRaw  = rois.klls    ? (await ocrBuffer(rois.klls,    DIGITS)).trim() : "";
   const pow = Number((powRaw || "").replace(/\D/g, ""));
-  const kp  = Number((kpRaw  || "").replace(/\D/g, ""));
-  return (Number.isFinite(pow) && pow > 1000) || (Number.isFinite(kp) && kp > 1000);
+  const klls  = Number((kllsRaw  || "").replace(/\D/g, ""));
+  return (Number.isFinite(pow) && pow > 1000) || (Number.isFinite(klls) && klls > 1000);
 }
 
 async function waitProfileOrGiveUp(timeoutMs = 3200, pollMs = 250) {
@@ -673,6 +692,24 @@ async function main() {
   console.log(`Action log saved: ${path.relative(ROOT_DIR, actionsPath)}`);
 
   console.log(`Backups:\n  - ${path.relative(ROOT_DIR, backupAllPath)}\n  - ${path.relative(ROOT_DIR, backupRunPath)}`);
+
+  // --- ДОДАНО: якщо запустили як zone <n> start/finish — запишемо зону ПІСЛЯ повного звичного скану ---
+  if (ZONE_MODE) {
+    try {
+      if (ZONE_MODE.mode === "start") {
+        await zoneStart(ZONE_MODE.number, { run_id, visited, finished_at: new Date().toISOString() });
+        console.log(`Zone ${ZONE_MODE.number}: START stored`);
+      } else if (ZONE_MODE.mode === "finish") {
+        await zoneFinish(ZONE_MODE.number, { run_id, visited, finished_at: new Date().toISOString() });
+        console.log(`Zone ${ZONE_MODE.number}: FINISH stored`);
+      }
+      const zr = await getZone(ZONE_MODE.number);
+      console.log("Zone record:", zr);
+    } catch (e) {
+      console.warn("Zone save error:", e?.message || String(e));
+    }
+  }
+
   await closeOCR();
   await closeDb();
 }
