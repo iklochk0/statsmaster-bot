@@ -26,6 +26,8 @@ const OBJECTS = [
   "players",
   "runs",
   "stats",
+  "zone_scans",
+  "zone_snapshots"
 ];
 
 const SQL = `

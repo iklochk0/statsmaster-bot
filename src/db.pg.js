@@ -1,4 +1,3 @@
-// src/db.js — full version (Scan Bot + KvK + Zone tracking)
 import { Pool } from "pg";
 
 const pool = new Pool({
@@ -45,16 +44,39 @@ export async function initSchema() {
       updated_at timestamptz NOT NULL
     );
 
-    -- Zone scans (початок / кінець боїв)
+    -- Зони (міграція: було zone_number INT; додаємо zone_code TEXT + унік. індекс)
     CREATE TABLE IF NOT EXISTS zone_scans (
       id SERIAL PRIMARY KEY,
-      zone_number INT NOT NULL,
+      zone_code TEXT,
       start_scan_time timestamptz,
       end_scan_time timestamptz,
       start_scan_data JSONB,
       end_scan_data JSONB
     );
+  `);
 
+  // Міграції для zone_scans
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name='zone_scans' AND column_name='zone_code'
+      ) THEN
+        ALTER TABLE zone_scans ADD COLUMN zone_code TEXT;
+      END IF;
+      -- Якщо колись був zone_number — спробуємо перенести значення
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name='zone_scans' AND column_name='zone_number'
+      ) THEN
+        UPDATE zone_scans SET zone_code = COALESCE(zone_code, zone_number::text);
+      END IF;
+    END$$;
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_zone_scans_zone_code ON zone_scans(zone_code);
+  `);
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS kvk_periods (
       kvk_id BIGSERIAL PRIMARY KEY,
       name TEXT NOT NULL,
@@ -87,7 +109,7 @@ export async function initSchema() {
     );
   `);
 
-  // View прогресу (на основі latest і стартових значень/ваг)
+  // View прогресу
   await pool.query(`
     CREATE OR REPLACE VIEW kvk_progress AS
     SELECT
@@ -112,19 +134,16 @@ export async function initSchema() {
     JOIN kvk_config c ON c.kvk_id = g.kvk_id;
   `);
 
-  // -------- Indexes --------
+  // Indexes
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_stats_player ON stats(player_id);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_stats_run    ON stats(run_id);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_latest_upd   ON latest(updated_at DESC);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_kvk_goals_player ON kvk_goals(player_id);`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_kvk_goals_kvk    ON kvk_goals(kvk_id);`);
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_zone_number ON zone_scans(zone_number);`);
 }
 
 // ---------------- Base ops ----------------
-export async function closeDb() {
-  await pool.end();
-}
+export async function closeDb() { await pool.end(); }
 
 export async function beginRun() {
   const { rows } = await pool.query(
@@ -157,8 +176,14 @@ export async function insertStats(run_id, player_id, s) {
        dkp   = COALESCE(EXCLUDED.dkp, stats.dkp)`,
     [
       run_id, player_id,
-      s.power ?? null, s.kills ?? null, s.dead ?? null,
-      s.kills?.t1 ?? null, s.kills?.t2 ?? null, s.kills?.t3 ?? null, s.kills?.t4 ?? null, s.kills?.t5 ?? null,
+      s.power ?? null,
+      s.kills ?? null,     // ВАЖЛИВО: тут вже число (t4+t5)
+      s.dead ?? null,
+      s.kills?.t1 ?? s.t1 ?? null,
+      s.kills?.t2 ?? s.t2 ?? null,
+      s.kills?.t3 ?? s.t3 ?? null,
+      s.kills?.t4 ?? s.t4 ?? null,
+      s.kills?.t5 ?? s.t5 ?? null,
       s.dkp ?? null
     ]
   );
@@ -173,8 +198,14 @@ export async function insertStats(run_id, player_id, s) {
        t1 = EXCLUDED.t1, t2 = EXCLUDED.t2, t3 = EXCLUDED.t3, t4 = EXCLUDED.t4, t5 = EXCLUDED.t5`,
     [
       player_id, (s.name ?? null),
-      s.power ?? null, s.kills ?? null, s.dead ?? null,
-      s.kills?.t1 ?? null, s.kills?.t2 ?? null, s.kills?.t3 ?? null, s.kills?.t4 ?? null, s.kills?.t5 ?? null
+      s.power ?? null,
+      s.kills ?? null,
+      s.dead ?? null,
+      s.kills?.t1 ?? s.t1 ?? null,
+      s.kills?.t2 ?? s.t2 ?? null,
+      s.kills?.t3 ?? s.t3 ?? null,
+      s.kills?.t4 ?? s.t4 ?? null,
+      s.kills?.t5 ?? s.t5 ?? null
     ]
   );
 }
@@ -219,6 +250,13 @@ export async function kvkActiveId() {
   return rows[0]?.kvk_id || null;
 }
 
+export async function ensureActiveKvK(name = null) {
+  let id = await kvkActiveId();
+  if (id) return id;
+  id = await kvkStart(name);
+  return id;
+}
+
 export async function kvkSetWeight(which, value, kvk_id = null) {
   const col = which === "dead" ? "dead_to_kills"
             : which === "kills" ? "kills_weight"
@@ -250,6 +288,7 @@ export async function kvkEnsureGoal(player_id) {
   );
   const cfg = cr[0];
 
+  // Цілі за power (можеш підкрутити формулу)
   const goal_kills = Math.round(2.2 * Number(l.power || 0));
   const goal_dead  = Math.round(Number(l.power || 0) / 87);
   const goal_dkp   = Math.round(cfg.kills_weight * goal_kills + cfg.dead_to_kills * goal_dead);
@@ -331,38 +370,44 @@ export async function insertStatsWithKvKAndDeltas(run_id, player_id, s) {
   return { progress, deltas };
 }
 
-// ---------------- Zone helpers ----------------
-export async function zoneStart(zone_number, scan_data = null) {
+// ---------------- Zone helpers (тепер zone_code TEXT) ----------------
+export async function zoneStart(zone, scan_data = null) {
+  const code = String(zone);
   await pool.query(
-    `INSERT INTO zone_scans (zone_number, start_scan_time, start_scan_data)
+    `INSERT INTO zone_scans (zone_code, start_scan_time, start_scan_data)
      VALUES ($1, now(), $2)
-     ON CONFLICT (zone_number)
-     DO NOTHING`,
-    [zone_number, scan_data ? JSON.stringify(scan_data) : null]
+     ON CONFLICT (zone_code) DO UPDATE SET
+       start_scan_time = COALESCE(zone_scans.start_scan_time, EXCLUDED.start_scan_time),
+       start_scan_data = COALESCE(zone_scans.start_scan_data, EXCLUDED.start_scan_data)`,
+    [code, scan_data ? JSON.stringify(scan_data) : null]
   );
 }
 
-export async function zoneFinish(zone_number, scan_data = null) {
+export async function zoneFinish(zone, scan_data = null) {
+  const code = String(zone);
   await pool.query(
-    `UPDATE zone_scans
-     SET end_scan_time = now(), end_scan_data = $2
-     WHERE zone_number = $1`,
-    [zone_number, scan_data ? JSON.stringify(scan_data) : null]
+    `INSERT INTO zone_scans (zone_code, end_scan_time, end_scan_data)
+     VALUES ($1, now(), $2)
+     ON CONFLICT (zone_code) DO UPDATE SET
+       end_scan_time = EXCLUDED.end_scan_time,
+       end_scan_data = EXCLUDED.end_scan_data`,
+    [code, scan_data ? JSON.stringify(scan_data) : null]
   );
 }
 
-export async function getZone(zone_number) {
+export async function getZone(zone) {
+  const code = String(zone);
   const { rows } = await pool.query(
-    `SELECT * FROM zone_scans WHERE zone_number=$1`,
-    [zone_number]
+    `SELECT * FROM zone_scans WHERE zone_code=$1`,
+    [code]
   );
   return rows[0] || null;
 }
 
 export async function listZones() {
   const { rows } = await pool.query(
-    `SELECT zone_number, start_scan_time, end_scan_time
-     FROM zone_scans ORDER BY zone_number ASC`
+    `SELECT zone_code, start_scan_time, end_scan_time
+     FROM zone_scans ORDER BY start_scan_time NULLS LAST, zone_code ASC`
   );
   return rows;
 }
