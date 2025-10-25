@@ -1,13 +1,14 @@
-// src/bot.js — Discord bot with PNG stats (zones-aware), deltas, caching, logging, PNG leaderboard, and admin gating by role IDs.
-// Тюн під твої вимоги:
-//  - kills показуємо як scaled (kills/10 округлено до 100к)
-//  - прогрес-бари показують cur/goal і %
-//  - LEFT = скільки залишилось до цілей
-//  - права панель = "Your last fights at «ZoneName» zone" з цифрами тільки останньої зони
-//  - DKP, pct, топи і т.д. лишились
-//
-// NOTE: якщо в базі zone_scans тепер текстова назва зони (zone_name замість zone_number),
-// дивись TODO коменти нижче і підправ тільки ті місця.
+// src/bot.js
+// Discord bot that renders PNG stat cards with:
+//  - Kills scaled display
+//  - Progress bars (Kills / Dead / DKP) vs goals
+//  - LEFT: how much left to do
+//  - LAST ZONE: what you did in the latest finished zone
+//  - DKP % with tag (WARM UP / OVERDRIVE ...)
+// DB side is based on your db.pg.js:
+//   - zone_scans(zone_name, start_scan_data{run_id}, end_scan_data{run_id})
+//   - listZones(), getZone(zone_name)
+//   - latest, stats, kvk_goals, kvk_config, kvk_periods...
 
 import "dotenv/config";
 import { Client, GatewayIntentBits, AttachmentBuilder, PermissionsBitField } from "discord.js";
@@ -91,19 +92,27 @@ function checkCooldown(userId){
   return 0;
 }
 
-// shorten long player names
+// обрізати ім'я
 function trimName(s = "", max = 22) {
   s = String(s || "");
   return s.length > max ? s.slice(0, max - 1) + "…" : s;
 }
 
-// scale kills for display:
-//   scaledKills = kills/10, потім округлити до 100к
+// kills (для хедера зверху): kills / 10, округлено до 100k
 function scaleKillsDisplay(rawKills) {
   const base = Number(rawKills || 0) / 10;
-  // округлити до сотень тисяч
   const rounded = Math.round(base / 100000) * 100000;
   return rounded;
+}
+
+// тег зверху справа по % DKP
+function autoTag(pct) {
+  const v = Number(pct) || 0;
+  if (v >= 170) return "WHALE KILLER";
+  if (v >= 140) return "OVERDRIVE";
+  if (v >= 110) return "OVERCAP";
+  if (v >= 90)  return "ON TRACK";
+  return "WARM UP";
 }
 
 /* ───────────────────────── DB ───────────────────────── */
@@ -113,6 +122,7 @@ const pool = new Pool({
 });
 await initSchema();
 
+// зв'язка дискорд <-> player_id
 await pool.query(`
   CREATE TABLE IF NOT EXISTS discord_links (
     discord_id TEXT PRIMARY KEY,
@@ -120,19 +130,21 @@ await pool.query(`
   );
 `);
 
-/* ---- helpers to talk to DB ---- */
 async function fetchLatestById(id) {
   const { rows } = await pool.query(
     `SELECT l.player_id, l.name, l.power, l.kills, l.dead, l.t1, l.t2, l.t3, l.t4, l.t5, l.updated_at
-     FROM latest l
-     WHERE l.player_id = $1`,
+       FROM latest l
+      WHERE l.player_id = $1`,
     [id]
   );
   return rows[0] || null;
 }
 
 async function fetchLink(discordId) {
-  const { rows } = await pool.query(`SELECT player_id FROM discord_links WHERE discord_id=$1`, [discordId]);
+  const { rows } = await pool.query(
+    `SELECT player_id FROM discord_links WHERE discord_id=$1`,
+    [discordId]
+  );
   return rows[0]?.player_id || null;
 }
 
@@ -146,23 +158,27 @@ async function setLink(discordId, playerId) {
 }
 
 async function removeLink(discordId) {
-  await pool.query(`DELETE FROM discord_links WHERE discord_id=$1`, [discordId]);
+  await pool.query(
+    `DELETE FROM discord_links WHERE discord_id=$1`,
+    [discordId]
+  );
 }
 
+// топи за останнім зрізом
 async function fetchTop(by = "kills", limit = 10) {
   const col = by === "power" ? "power" : "kills";
   const { rows } = await pool.query(
     `SELECT player_id, name, ${col} AS metric
-     FROM latest
-     WHERE ${col} IS NOT NULL
-     ORDER BY ${col} DESC
-     LIMIT $1`,
+       FROM latest
+      WHERE ${col} IS NOT NULL
+      ORDER BY ${col} DESC
+      LIMIT $1`,
     [limit]
   );
   return rows;
 }
 
-// для зон: всі stats певного run_id -> Map(player_id -> row)
+// статику гравців на конкретному run_id
 async function fetchStatsByRun(runId) {
   const { rows } = await pool.query(
     `SELECT s.player_id, p.name,
@@ -177,24 +193,23 @@ async function fetchStatsByRun(runId) {
   return m;
 }
 
-/* ─────────────────────── zone math ─────────────────────── */
+/* ─────────────────────── ZONE CALCS ─────────────────────── */
 
 /**
  * computeZoneSumForPlayer:
- *   сумарна дельта по УСІХ завершених зонах:
- *   (kills, dead, power, T1..T5)
+ *   сума всіх ЗАКІНЧЕНИХ зон.
+ *   для кожної зони беремо start_scan_data.run_id і end_scan_data.run_id
+ *   і рахуємо дельту гравця по kills/dead/power/tiers.
  */
 async function computeZoneSumForPlayer(playerId) {
   const zones = await listZones();
-  // беремо тільки зони які мають і start і finish
+  // тільки ті, що мають end_scan_time
   const finishedZones = zones.filter(z => z.end_scan_time);
 
   let dPower = 0, dKills = 0, dDead = 0, dT1=0,dT2=0,dT3=0,dT4=0,dT5=0;
 
   for (const z of finishedZones) {
-    // TODO if table now has zone_name TEXT instead of zone_number INT:
-    // const full = await getZone(z.zone_name);
-    const full = await getZone(z.zone_number);
+    const full = await getZone(z.zone_name);
 
     const startRunId = Number(full?.start_scan_data?.run_id ?? full?.start_scan_data?.["run_id"]);
     const endRunId   = Number(full?.end_scan_data?.run_id   ?? full?.end_scan_data?.["run_id"]);
@@ -222,13 +237,11 @@ async function computeZoneSumForPlayer(playerId) {
 
 /**
  * computeLastZoneDeltaForPlayer:
- *   беремо ОСТАННЮ закінчену зону (по end_scan_time)
- *   рахуємо дельту ТІЛЬКИ в ній
- *   повертаємо { zoneName, dKillsZone, dDeadZone }
+ *   беремо останню завершену зону (найпізніший end_scan_time)
+ *   і повертаємо тільки її дельту kills/dead + її ім'я.
  */
 async function computeLastZoneDeltaForPlayer(playerId) {
   const zones = await listZones();
-  // вибираємо лише ті, що закінчені (є end_scan_time)
   const done = zones
     .filter(z => z.end_scan_time)
     .sort((a,b)=> new Date(b.end_scan_time).getTime() - new Date(a.end_scan_time).getTime());
@@ -242,16 +255,13 @@ async function computeLastZoneDeltaForPlayer(playerId) {
   }
 
   const last = done[0];
-
-  // TODO if you renamed "zone_number" -> "zone_name",
-  // then use last.zone_name here + in getZone() above.
-  const full = await getZone(last.zone_number);
+  const full = await getZone(last.zone_name);
 
   const startRunId = Number(full?.start_scan_data?.run_id ?? full?.start_scan_data?.["run_id"]);
   const endRunId   = Number(full?.end_scan_data?.run_id   ?? full?.end_scan_data?.["run_id"]);
   if (!Number.isFinite(startRunId) || !Number.isFinite(endRunId)) {
     return {
-      zoneName: String(last.zone_number ?? "–"),
+      zoneName: String(last.zone_name ?? "–"),
       dKillsZone: 0,
       dDeadZone : 0,
     };
@@ -262,10 +272,9 @@ async function computeLastZoneDeltaForPlayer(playerId) {
 
   const s = startMap.get(String(playerId));
   const e = endMap.get(String(playerId));
-
   if (!s || !e) {
     return {
-      zoneName: String(last.zone_number ?? "–"),
+      zoneName: String(last.zone_name ?? "–"),
       dKillsZone: 0,
       dDeadZone : 0,
     };
@@ -275,21 +284,19 @@ async function computeLastZoneDeltaForPlayer(playerId) {
   const dDeadZone  = Math.max(0, Number(e.dead ||0) - Number(s.dead ||0));
 
   return {
-    // TODO if you actually store text zone names:
-    // zoneName: last.zone_name ?? "Zone",
-    zoneName: String(last.zone_number ?? "Zone"),
+    zoneName: String(last.zone_name ?? "Zone"),
     dKillsZone,
     dDeadZone,
   };
 }
 
 /**
- * buildZoneBasedKvkBundle(playerIdBigInt, latestRowFromLatest)
- * повертає все, що треба для картки:
- *  - r: прогрес на KvK з врахуванням зон (total dKills/dDead/dkp/goal/pct)
- *  - deltas: дельти для верхніх метрик (Power, Kills, Dead, T5, T4)
- *  - left: скільки залишилось kills/dead
- *  - lastZone: {zoneName, dKillsZone, dDeadZone}
+ * buildZoneBasedKvkBundle(playerIdBigInt, latestRowFromLatest):
+ *   - тягне активний KvK
+ *   - бере goals (kills/dead/dkp)
+ *   - рахує суму по ВСІХ завершених зонах (zoneSum)
+ *   - рахує останню зону (lastZone)
+ *   - рахує DKP і відсоток
  */
 async function buildZoneBasedKvkBundle(playerIdBigInt, latest) {
   const active = await kvkActiveId();
@@ -314,28 +321,28 @@ async function buildZoneBasedKvkBundle(playerIdBigInt, latest) {
     if (cRows[0]) cfg = cRows[0];
   }
 
-  // загальна сума по всіх зонах
-  const zoneSum = await computeZoneSumForPlayer(playerIdBigInt);
-  // остання зона
+  // сума по всіх закінчених зонах
+  const zoneSum  = await computeZoneSumForPlayer(playerIdBigInt);
+  // тільки остання зона
   const lastZone = await computeLastZoneDeltaForPlayer(playerIdBigInt);
 
-  // DKP по сумі зон
+  const dKills = Number(zoneSum.dKills||0);
+  const dDead  = Number(zoneSum.dDead ||0);
+
+  // DKP = kills_weight*kills + dead_to_kills*dead
   const dkp = Math.round(
-    (Number(cfg.kills_weight||0)    * Number(zoneSum.dKills||0)) +
-    (Number(cfg.dead_to_kills||0)   * Number(zoneSum.dDead ||0))
+    (Number(cfg.kills_weight||0)  * dKills) +
+    (Number(cfg.dead_to_kills||0) * dDead )
   );
 
   const goalKills = Number(goal?.goal_kills || 0);
   const goalDead  = Number(goal?.goal_dead  || 0);
   const goalDKP   = Number(goal?.goal_dkp   || 0);
 
-  const dKills = Number(zoneSum.dKills||0);
-  const dDead  = Number(zoneSum.dDead ||0);
-
   const killsLeft = Math.max(0, goalKills - dKills);
-  const deadLeft  = Math.max(0, goalDead  - dDead);
+  const deadLeft  = Math.max(0, goalDead  - dDead );
+  const dkpLeft   = Math.max(0, goalDKP   - dkp   );
 
-  // прогрес по DKP (pct)
   const pctRaw = goalDKP > 0 ? (100 * dkp / goalDKP) : 0;
 
   const r = {
@@ -348,10 +355,10 @@ async function buildZoneBasedKvkBundle(playerIdBigInt, latest) {
     pct        : pctRaw,
     killsLeft,
     deadLeft,
-    lastZone, // так прокинемо вниз щоб не губити
+    dkpLeft,
+    lastZone,
   };
 
-  // дельти для верхніх метрик (показуємо кольорові ± під кожним числом)
   const deltas = {
     dPower: Number(zoneSum.dPower||0),
     dKills: dKills,
@@ -363,63 +370,45 @@ async function buildZoneBasedKvkBundle(playerIdBigInt, latest) {
   return { r, deltas };
 }
 
-/* ─────────────────────── card renderer ─────────────────────── */
+/* ─────────────────────── CARD RENDERER ─────────────────────── */
 
-/**
- * stripeCardSVG(bundle.r, latest, bundle.deltas)
- * тут ми:
- *   - показуємо kills скейлені (kills/10 округлені до 100к)
- *   - у барах:
- *        * Kills(scaled): використовуємо d_kills (але показуємо як scaled)
- *        * Dead: d_dead
- *        * DKP: dkp
- *     cur/goal відображається (наприклад "123 / 500")
- *   - LEFT: показує скільки залишилось (killsLeft • deadLeft)
- *   - справа: "Your last fights at «ZoneName» zone"
- *       показати скільки саме зроблено в останній зоні (dKillsZone • dDeadZone)
- *
- * важливо:
- *   pctKills, pctDead, pctDKP = прогрес проти цілей
- *   pctDKP_raw = r.pct
- */
-function stripeCardSVG(r, latest, deltas) {
+function stripeCardSVG(bundle, latest) {
+  const r = bundle.r;
+  const deltas = bundle.deltas;
+
   const W = 1100, H = 640;
   const panel = "#0f1218", card = "#121722", grid = "#1e2633", text = "#e6edf7", sub = "#a9b4c6";
   const track = "#2b3342", color1 = "#00c853", color2 = "#7c4dff";
 
-  // зверху праворуч — % DKP
+  // DKP%
   const pctDKP_raw = Number(r?.pct) || 0;
   const pctDKP     = clamp(pctDKP_raw, 0, 220);
 
-  // бари Kills / Dead / DKP
-  // прогрес для Kills: (d_kills vs goal_kills)
+  // бари
   const pctKills = clamp(
     ((Number(r?.d_kills)||0) / (Number(r?.goal_kills)||0) * 100) || 0,
     0, 220
   );
-  // прогрес для Dead: (d_dead vs goal_dead)
   const pctDead  = clamp(
     ((Number(r?.d_dead)||0) / (Number(r?.goal_dead)||0) * 100) || 0,
     0, 220
   );
 
-  // DKP прогрес — через pctDKP_raw
-
-  const dkpLeft   = Math.max(0, Number(r?.goal_dkp   || 0) - Number(r?.dkp      || 0));
+  // залишки
   const killsLeft = Number(r?.killsLeft || 0);
   const deadLeft  = Number(r?.deadLeft  || 0);
+  const dkpLeft   = Number(r?.dkpLeft   || 0);
 
   // остання зона
   const zoneName      = r?.lastZone?.zoneName ?? "–";
   const lastKillsZone = Number(r?.lastZone?.dKillsZone || 0);
   const lastDeadZone  = Number(r?.lastZone?.dDeadZone  || 0);
 
-  // заголовок гравця + час
+  // верхній заголовок
   const title   = latest?.name ? `${latest.name} (${latest.player_id})` : String(latest?.player_id ?? "");
   const updated = latest?.updated_at ? new Date(latest.updated_at) : new Date();
 
-  // зверху метрички:
-  // kills показуємо scaled kills (останній latest.kills)
+  // kills в хедері: scaled (kills/10 округлено до 100к)
   const scaledKillsNow = scaleKillsDisplay(latest?.kills);
 
   const x0 = 50;
@@ -431,11 +420,12 @@ function stripeCardSVG(r, latest, deltas) {
   const BAR_LABEL_OFF = -12;
   const BAR_PCT_OFF   = Math.floor(hBar/2) + 7;
 
-  // дві нижні коробки однакового розміру
-  const bottomBoxW = 500;
+  // нижні картки
+  const bottomBoxW = 490;
   const bottomBoxH = 60;
   const bottomBoxR = 10;
-  const bottomY    = yBase + GAP*2 + 90; // трохи нижче останнього бара
+  const bottomGapX = 40;
+  const bottomY    = yBase + GAP*2 + 90;
 
   function segLengths(pct) {
     return {
@@ -520,15 +510,15 @@ function stripeCardSVG(r, latest, deltas) {
       <text y="46" class="m" style="fill:${cT4}">${fmtDelta(dT4)}</text>
     </g>
 
-    <!-- top-right: DKP % and tag -->
+    <!-- DKP% top-right -->
     <text x="${W-50}" y="62" text-anchor="end" class="b">${pct1(pctDKP_raw)}%</text>
     <text x="${W-50}" y="88" text-anchor="end" class="tg">${autoTag(pctDKP_raw)}</text>
 
-    <!-- bars -->
+    <!-- Progress bars -->
     ${barRow({
-      label: "Kills (scaled)",
+      label: "Kills",
       pct: pctKills,
-      cur: r?.d_kills   || 0,         // NOTE: тут сирі d_kills (НЕ поділені на 10). Якщо хочеш теж скейлити — можна тут scaleKillsDisplay(r?.d_kills)
+      cur: r?.d_kills    || 0,
       goal: r?.goal_kills|| 0,
       y: yBase
     })}
@@ -536,35 +526,33 @@ function stripeCardSVG(r, latest, deltas) {
     ${barRow({
       label: "Dead",
       pct: pctDead,
-      cur: r?.d_dead    || 0,
-      goal: r?.goal_dead|| 0,
+      cur: r?.d_dead     || 0,
+      goal: r?.goal_dead || 0,
       y: yBase + GAP
     })}
 
     ${barRow({
       label: "DKP",
       pct: pctDKP,
-      cur: r?.dkp       || 0,
-      goal: r?.goal_dkp || 0,
+      cur: r?.dkp        || 0,
+      goal: r?.goal_dkp  || 0,
       y: yBase + GAP*2
     })}
 
-    <!-- bottom row cards -->
-    <!-- LEFT card -->
+    <!-- bottom two cards: LEFT / LAST FIGHTS -->
     <g transform="translate(${x0}, ${bottomY})">
       <text x="0" y="0" class="lbl">LEFT</text>
       <rect x="0" y="16" width="${bottomBoxW}" height="${bottomBoxH}" rx="${bottomBoxR}" fill="${track}"/>
       <text x="16" y="52" class="m">Kills ${nf(killsLeft)} • Dead ${nf(deadLeft)}</text>
     </g>
 
-    <!-- LAST ZONE card -->
-    <g transform="translate(${x0+bottomBoxW+40}, ${bottomY})">
+    <g transform="translate(${x0+bottomBoxW+${bottomGapX}}, ${bottomY})">
       <text x="0" y="0" class="lbl">YOUR LAST FIGHTS AT "${zoneName}" ZONE</text>
       <rect x="0" y="16" width="${bottomBoxW}" height="${bottomBoxH}" rx="${bottomBoxR}" fill="${track}"/>
       <text x="16" y="52" class="m">Kills ${nf(lastKillsZone)} • Dead ${nf(lastDeadZone)}</text>
     </g>
 
-    <!-- tiny DKP left (може знадобиться) -->
+    <!-- DKP left -->
     <g transform="translate(${x0}, ${bottomY + bottomBoxH + 60})">
       <text class="mm">DKP left: ${nf(dkpLeft)}</text>
     </g>
@@ -573,7 +561,7 @@ function stripeCardSVG(r, latest, deltas) {
 }
 
 async function renderStripeCard(bundle, latest) {
-  const svg = stripeCardSVG(bundle.r, latest, bundle.deltas);
+  const svg = stripeCardSVG(bundle, latest);
   return await sharp(Buffer.from(svg, "utf8")).png().toBuffer();
 }
 
@@ -680,7 +668,7 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
 });
 
-/* ─────────────────────── command helpers ─────────────────────── */
+/* ─────────────────────── helpers ─────────────────────── */
 async function getLinkedPlayerIdOrReply(msg) {
   const linked = await fetchLink(msg.author.id);
   if (!linked) {
@@ -726,7 +714,6 @@ client.on("messageCreate", async (msg) => {
       const latest = await fetchLatestById(idArg);
       if (!latest) return void msg.reply("No data yet. Run the scanner first.");
 
-      // будуємо bundle (зони + goals)
       const bundle = await buildZoneBasedKvkBundle(BigInt(idArg), latest);
 
       const key = cacheKeyPlayer(idArg, bundle.r, latest);
@@ -773,7 +760,10 @@ client.on("messageCreate", async (msg) => {
         return void msg.reply("Usage: `!link [@user] <player_id>`");
       }
 
-      const { rows } = await pool.query(`SELECT 1 FROM players WHERE id=$1 LIMIT 1`, [idArg]);
+      const { rows } = await pool.query(
+        `SELECT 1 FROM players WHERE id=$1 LIMIT 1`,
+        [idArg]
+      );
       if (!rows.length) {
         return void msg.reply(`Player_id **${idArg}** does not exist. Ask an admin to check scanner.`);
       }
@@ -825,19 +815,18 @@ client.on("messageCreate", async (msg) => {
         "`!kvk weight show` — show current DKP weights",
         "`!kvk weight <dead|kills> <value>` — set DKP weights",
         "`!kvk ensure <player_id>` / `!kvk ensure_all` — create/update goals",
-        "`!kvk stats <player_id>` / `!kvk me` — **zone-based PNG** progress",
+        "`!kvk stats <player_id>` / `!kvk me` — zone-based PNG progress",
         "`!kvk top [N] [text]` — top by progress % (PNG by default; add \`text\` for text)",
         "`!top [kills|power] [N]` — top by latest",
       ].join("\n");
       return void msg.reply(HELP_ADMIN);
     }
 
-    /* ===== ADMIN-ONLY from here ===== */
+    /* ===== ADMIN-ONLY (далі) ===== */
     if (!isAdmin(msg)) {
       return void msg.reply("Admins only. Public: `!stats`, `!me`, `!link`, `!unlink`, `!help`.");
     }
 
-    // KvK admin / control
     if (cmd === "kvk" && args[0] === "start") {
       const name = args.slice(1).join(" ") || null;
       const id = await kvkStart(name);
@@ -854,7 +843,9 @@ client.on("messageCreate", async (msg) => {
         const id = await kvkActiveId();
         if (!id) return void msg.reply("No active period.");
         const { rows } = await pool.query(
-          `SELECT kills_weight, dead_to_kills FROM kvk_config WHERE kvk_id=$1`,
+          `SELECT kills_weight, dead_to_kills
+             FROM kvk_config
+            WHERE kvk_id=$1`,
           [id]
         );
         if (!rows[0]) return void msg.reply("No weights found for the active period.");
@@ -899,7 +890,7 @@ client.on("messageCreate", async (msg) => {
       return void msg.reply(`Goals ensured: **${made}** (skipped: ${skipped}).`);
     }
 
-    // kvk stats (PNG з оновленим дизайном)
+    // kvk stats (PNG для будь-якого player_id)
     if (cmd === "kvk" && args[0] === "stats") {
       const pid = parsePlayerId(args[1]);
       if (pid == null) return void msg.reply("Usage: `!kvk stats <player_id>`");
@@ -924,6 +915,7 @@ client.on("messageCreate", async (msg) => {
       return log.info({ ...baseCtx(msg), cmd: "kvk stats", ms: Date.now()-began, ok: true });
     }
 
+    // kvk me (PNG для себе)
     if (cmd === "kvk" && args[0] === "me") {
       const linked = await getLinkedPlayerIdOrReply(msg);
       if (!linked) return;
@@ -979,6 +971,7 @@ client.on("messageCreate", async (msg) => {
       return void msg.reply({ files: [file] });
     }
 
+    // simple top by power/kills
     if (cmd === "top") {
       const by = (args[0] || "kills").toLowerCase();
       const limit = Math.min(Math.max(parseInt(args[1] || "10", 10) || 10, 1), 50);
