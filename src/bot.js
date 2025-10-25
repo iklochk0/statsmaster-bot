@@ -384,7 +384,7 @@ function stripeCardSVG(bundle, latest) {
   const pctDKP_raw = Number(r?.pct) || 0;
   const pctDKP     = clamp(pctDKP_raw, 0, 220);
 
-  // бари
+  // прогрес по kills/dead
   const pctKills = clamp(
     ((Number(r?.d_kills)||0) / (Number(r?.goal_kills)||0) * 100) || 0,
     0, 220
@@ -394,7 +394,7 @@ function stripeCardSVG(bundle, latest) {
     0, 220
   );
 
-  // залишки
+  // залишилось
   const killsLeft = Number(r?.killsLeft || 0);
   const deadLeft  = Number(r?.deadLeft  || 0);
   const dkpLeft   = Number(r?.dkpLeft   || 0);
@@ -404,13 +404,14 @@ function stripeCardSVG(bundle, latest) {
   const lastKillsZone = Number(r?.lastZone?.dKillsZone || 0);
   const lastDeadZone  = Number(r?.lastZone?.dDeadZone  || 0);
 
-  // верхній заголовок
+  // шапка
   const title   = latest?.name ? `${latest.name} (${latest.player_id})` : String(latest?.player_id ?? "");
   const updated = latest?.updated_at ? new Date(latest.updated_at) : new Date();
 
-  // kills в хедері: scaled (kills/10 округлено до 100к)
+  // kills в шапці: scaled (kills/10 округлено до 100к)
   const scaledKillsNow = scaleKillsDisplay(latest?.kills);
 
+  // геометрія
   const x0 = 50;
   const innerWidth = W - 100;
   const hBar = 28;
@@ -426,6 +427,9 @@ function stripeCardSVG(bundle, latest) {
   const bottomBoxR = 10;
   const bottomGapX = 40;
   const bottomY    = yBase + GAP*2 + 90;
+
+  // позиція другої коробки справа
+  const secondBoxX = x0 + bottomBoxW + bottomGapX;
 
   function segLengths(pct) {
     return {
@@ -546,7 +550,7 @@ function stripeCardSVG(bundle, latest) {
       <text x="16" y="52" class="m">Kills ${nf(killsLeft)} • Dead ${nf(deadLeft)}</text>
     </g>
 
-    <g transform="translate(${x0+bottomBoxW+${bottomGapX}}, ${bottomY})">
+    <g transform="translate(${secondBoxX}, ${bottomY})">
       <text x="0" y="0" class="lbl">YOUR LAST FIGHTS AT "${zoneName}" ZONE</text>
       <rect x="0" y="16" width="${bottomBoxW}" height="${bottomBoxH}" rx="${bottomBoxR}" fill="${track}"/>
       <text x="16" y="52" class="m">Kills ${nf(lastKillsZone)} • Dead ${nf(lastDeadZone)}</text>
@@ -559,6 +563,7 @@ function stripeCardSVG(bundle, latest) {
   </g>
 </svg>`;
 }
+
 
 async function renderStripeCard(bundle, latest) {
   const svg = stripeCardSVG(bundle, latest);
