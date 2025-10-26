@@ -2,7 +2,7 @@
 // CityHall25 scanner бот
 // - відкриття профілів по списку
 // - OCR полів (id, name, power, kp, t1..t5, dead, etc.)
-// - вставка в Postgres через db.pg.js
+// - вставка в Postgres через db.pg.js (saveScan)
 // - KvK автогоал (ТІЛЬКИ в baseline режимі `npm run scan`)
 // - random fake swipe у "смертях"
 // - подвійні тапи (copyName + закриття смертей) з довшою рандомною паузою (0.5-1.1s)
@@ -35,8 +35,7 @@ import { navigate, sleep } from "./emu.js";
 import {
   initSchema,
   beginRun,
-  upsertPlayer,
-  insertStats,
+  saveScan,          // <── НОВЕ
   kvkEnsureGoal,
   kvkActiveId,
   closeDb,
@@ -651,11 +650,10 @@ async function scanProfileOnce() {
   // {
   //   id, name,
   //   power,
-  //   kp,        <-- Kill Points (ОБОВ'ЯЗКОВО)
+  //   kp,        <-- Kill Points TOTAL
   //   dead,
   //   t1,t2,t3,t4,t5
   // }
-  // (kills як "тільки t4+t5" нам вже не потрібен)
   const parsed = parseStats(texts);
   logAction("scanProfileOnce-result", { parsed });
   return parsed;
@@ -817,9 +815,8 @@ async function main() {
       console.log(`   Save ${pid} "${stats.name || ""}"`);
       logAction("save-player", { pid, name: stats.name || "" });
 
-      // запис у БД
-      await upsertPlayer({ id: pid, name: stats.name || "" });
-      await insertStats(run_id, pid, stats);
+      // одна функція замість upsertPlayer + insertStats
+      await saveScan(run_id, stats);
 
       // цілі створюємо тільки у baseline режимі
       if (BASELINE_MODE) {
@@ -871,8 +868,7 @@ async function main() {
       console.log(`   Save ${pid} "${stats.name || ""}"`);
       logAction("save-player", { pid, name: stats.name || "" });
 
-      await upsertPlayer({ id: pid, name: stats.name || "" });
-      await insertStats(run_id, pid, stats);
+      await saveScan(run_id, stats);
 
       if (BASELINE_MODE) {
         try {

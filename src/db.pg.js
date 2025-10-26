@@ -161,6 +161,104 @@ export async function initSchema() {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_zone_name ON zone_scans(zone_name);`);
 }
 
+
+// p очікується у форматі parseStats():
+// {
+//   id, name,
+//   power,
+//   kp,    // kill points TOTAL
+//   dead,
+//   t1, t2, t3, t4, t5
+// }
+export async function saveScan(run_id, p) {
+  const pid = Number(String(p.id || "").replace(/\D/g, ""));
+  if (!Number.isFinite(pid) || String(pid).length < 5) {
+    throw new Error("saveScan: invalid player id " + p.id);
+  }
+
+  // 1. players: зберегти/оновити імʼя
+  await pool.query(
+    `
+    INSERT INTO players (id, name)
+    VALUES ($1, $2)
+    ON CONFLICT (id) DO UPDATE
+      SET name = EXCLUDED.name
+    `,
+    [
+      pid,
+      p.name ?? "",
+    ]
+  );
+
+  // 2. stats: історичка для цього run_id
+  await pool.query(
+    `
+    INSERT INTO stats (
+      run_id,
+      player_id,
+      power,
+      kills,
+      dead,
+      t1, t2, t3, t4, t5
+    )
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+    `,
+    [
+      run_id,
+      pid,
+      p.power ?? null,
+      p.kp    ?? null, // записуємо KP у колонку kills
+      p.dead  ?? null,
+      p.t1 ?? null,
+      p.t2 ?? null,
+      p.t3 ?? null,
+      p.t4 ?? null,
+      p.t5 ?? null,
+    ]
+  );
+
+  // 3. latest: оновити "поточний стан"
+  await pool.query(
+    `
+    INSERT INTO latest (
+      player_id,
+      name,
+      power,
+      kills,
+      dead,
+      t1, t2, t3, t4, t5,
+      updated_at
+    )
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, NOW())
+    ON CONFLICT (player_id) DO UPDATE SET
+      name       = EXCLUDED.name,
+      power      = EXCLUDED.power,
+      kills      = EXCLUDED.kills,
+      dead       = EXCLUDED.dead,
+      t1         = EXCLUDED.t1,
+      t2         = EXCLUDED.t2,
+      t3         = EXCLUDED.t3,
+      t4         = EXCLUDED.t4,
+      t5         = EXCLUDED.t5,
+      updated_at = NOW()
+    `,
+    [
+      pid,
+      p.name ?? "",
+      p.power ?? null,
+      p.kp    ?? null,
+      p.dead  ?? null,
+      p.t1 ?? null,
+      p.t2 ?? null,
+      p.t3 ?? null,
+      p.t4 ?? null,
+      p.t5 ?? null,
+    ]
+  );
+
+  return pid;
+}
+
 /* ================ Base ops ================ */
 export async function closeDb() {
   await pool.end();

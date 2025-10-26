@@ -418,244 +418,295 @@ async function buildZoneBasedKvkBundle(playerIdBigInt, latest) {
 
 /* ─────────────────────── CARD RENDERER ─────────────────────── */
 
-function stripeCardSVG(bundle, latest) {
-  const r = bundle.r;
-  const deltas = bundle.deltas;
-
-  const W = 1100,
-    H = 640;
-  const panel = "#0f1218",
-    card = "#121722",
-    grid = "#1e2633",
-    text = "#e6edf7",
-    sub = "#a9b4c6";
-  const track = "#2b3342",
-    color1 = "#00c853",
-    color2 = "#7c4dff";
-
-  const pctDKP_raw = Number(r?.pct) || 0;
-
-  // helper щоб не ловити Infinity при goal 0
-  function safePct(cur, goal) {
-    const c = Number(cur || 0);
-    const g = Number(goal || 0);
-    if (!g) return 0;
-    return (c / g) * 100;
-  }
-
-  const pctKills = clamp(
-    safePct(r?.d_kills, r?.goal_kills),
-    0,
-    220
-  );
-  const pctDead = clamp(
-    safePct(r?.d_dead, r?.goal_dead),
-    0,
-    220
-  );
-  const pctDKP = pctDKP_raw;
-
-  // показ цілей без округлення
-  const dispGoalKills = Number(r?.goal_kills || 0); // KP goal
-  const dispGoalDead  = Number(r?.goal_dead  || 0);
-  const dispGoalDkp   = Number(r?.goal_dkp   || 0);
-
-  // Left
-  const killsLeft = Number(r?.killsLeft || 0); // KP left
-  const deadLeft  = Number(r?.deadLeft  || 0);
-  const dkpLeft   = Number(r?.dkpLeft   || 0);
-
-  // Last zone
-  const zoneName      = r?.lastZone?.zoneName ?? "–";
-  const lastKillsZone = Number(r?.lastZone?.dKillsZone || 0); // KP delta
-  const lastDeadZone  = Number(r?.lastZone?.dDeadZone  || 0);
-
-  const title = latest?.name
-    ? `${latest.name} (${latest.player_id})`
-    : String(latest?.player_id ?? "");
-  const updated = latest?.updated_at
-    ? new Date(latest.updated_at)
-    : new Date();
-
-  // Kill Points зараз (full KP snapshot з latest.kills)
-  const killPointsNow = Number(latest?.kills || 0);
-
-  // Геометрія і верстка
-  const x0 = 50;
-  const innerWidth = W - 100;
-  const hBar = 28;
-  const rxy = 14;
-  const yBase = 230;
-  const GAP = 90;
-  const BAR_LABEL_OFF = -12;
-  const BAR_PCT_OFF = Math.floor(hBar / 2) + 7;
-
-  // нижні картки
-  const bottomBoxW = 490;
-  const bottomBoxH = 60;
-  const bottomBoxR = 10;
-  const bottomGapX = 40;
-  const bottomY = yBase + GAP * 2 + 90;
-
-  const secondBoxX = x0 + bottomBoxW + bottomGapX;
-
-  function segLengths(pct) {
-    return {
-      base: (innerWidth * Math.min(pct, 100)) / 100,
-      over:
-        (innerWidth *
-          Math.min(Math.max(0, pct - 100), 100)) /
-        100,
-    };
-  }
-
-  function barRow({ label, pct, cur, goal, y }) {
-    const L = segLengths(pct);
-    return `
-      <text x="${x0}" y="${y + BAR_LABEL_OFF}" class="s">${label}</text>
-      <rect x="${x0}" y="${y}" width="${innerWidth}" height="${hBar}" rx="${rxy}" fill="${track}"/>
-      ${
-        pct <= 100
-          ? `
-        <rect x="${x0}" y="${y}" width="${L.base}" height="${hBar}" rx="${rxy}" fill="${color1}"/>
-      `
-          : `
-        <rect x="${x0}" y="${y}" width="${innerWidth}" height="${hBar}" rx="${rxy}" fill="${color1}"/>
-        <rect x="${x0}" y="${y}" width="${L.over}"  height="${hBar}" rx="${rxy}" fill="${color2}"/>
-      `
-      }
-      <text x="${x0 + innerWidth / 2}" y="${
-      y + BAR_PCT_OFF
-    }" text-anchor="middle" class="m">${pct1(pct)}%</text>
-      <text x="${x0}" y="${y + 50}" class="m">${nf(
-        cur
-      )} / ${nf(goal)}</text>
-    `;
-  }
-
+function stripeCardSVG(data) {
   const {
-    dPower = 0,
-    dKills = 0,
-    dDead = 0,
-    dT5 = 0,
-    dT4 = 0,
-  } = deltas || {};
-  const cPow = colorDelta(dPower);
-  const cKills = colorDelta(dKills);
-  const cDead = colorDelta(dDead);
-  const cT5 = colorDelta(dT5);
-  const cT4 = colorDelta(dT4);
+    player,
+    goal,
+    progress,
+    warmUpPct,
+    lastZone,
+  } = data;
 
+  // ---- helpers ----
+  const nf = (n) =>
+    (n === null || n === undefined)
+      ? "0"
+      : Number(n).toLocaleString("en-US");
+
+  const safeNum = (n) => Number(n ?? 0);
+
+  // прогреси в %
+  const pctKills = goal.goal_kills
+    ? Math.min(100, (safeNum(progress.d_kills) / goal.goal_kills) * 100)
+    : 0;
+
+  const pctDead = goal.goal_dead
+    ? Math.min(100, (safeNum(progress.d_dead) / goal.goal_dead) * 100)
+    : 0;
+
+  const pctDKP = goal.goal_dkp
+    ? Math.min(100, (safeNum(progress.d_dkp) / goal.goal_dkp) * 100)
+    : 0;
+
+  // скільки лишилось
+  const killsLeft = Math.max(0, safeNum(goal.goal_kills) - safeNum(progress.d_kills));
+  const deadLeft  = Math.max(0, safeNum(goal.goal_dead)  - safeNum(progress.d_dead));
+  const dkpLeft   = Math.max(0, safeNum(goal.goal_dkp)   - safeNum(progress.d_dkp));
+
+  // last-zone блок показуємо ТІЛЬКИ якщо реально є дані
+  const hasLastZoneData =
+    lastZone &&
+    lastZone.zoneName &&
+    lastZone.zoneName !== "–" &&
+    (safeNum(lastZone.dKillsZone) > 0 || safeNum(lastZone.dDeadZone) > 0);
+
+  // кольори / розміри
+  const bg      = "#0d121d";
+  const textCol = "#fff";
+  const subCol  = "#9da5bd";
+  const barBg   = "#2a3142";
+  const barFill = "#6b7bff";
+
+  const w = 1100;
+  const h = 620;
+
+  // розміри барів
+  const barX = 50;
+  const barW = w - 100;
+  const barH = 24;
+  const barGapY = 60;
+
+  // нижні бокси
+  const bottomY = 400;
+  const boxW = (w - 150) / 2;
+  const boxH = 70;
+  const boxR = 8;
+
+  const leftBoxX = 50;
+  const rightBoxX = 50 + boxW + 50; // відступ між боксами ~50
+
+  // формат часу оновлення
+  const updatedAtStr = player.updated_at
+    ? new Date(player.updated_at).toLocaleString("en-US", {
+        hour12: true,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      })
+    : "";
+
+  // last zone box svg (умовно)
+  const lastZoneBox = hasLastZoneData ? `
+    <g transform="translate(${rightBoxX}, ${bottomY})">
+      <text x="0" y="0"
+            font-family="Inter, system-ui"
+            font-size="14"
+            fill="${subCol}"
+            font-weight="500"
+            >YOUR LAST FIGHTS AT "${lastZone.zoneName}" ZONE</text>
+
+      <rect x="0" y="16"
+            width="${boxW}" height="${boxH}"
+            rx="${boxR}"
+            fill="${barBg}"/>
+
+      <text x="16" y="52"
+            font-family="Inter, system-ui"
+            font-size="18"
+            fill="${textCol}"
+            font-weight="500"
+            >KP ${nf(lastZone.dKillsZone)} • Dead ${nf(lastZone.dDeadZone)}</text>
+    </g>
+  ` : "";
+
+  // повертаємо весь SVG
   return `
-<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
-  <defs>
-    <style>
-      .t  { font: 700 22px system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, sans-serif; fill: ${text}; }
-      .s  { font: 500 14px system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, sans-serif; fill: ${sub}; }
-      .b  { font: 800 40px system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, sans-serif; fill: ${text}; }
-      .tg { font: 800 16px system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, sans-serif; fill: ${text}; letter-spacing: 2px; }
-      .m  { font: 600 16px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fill: ${text}; }
-      .mm { font: 600 14px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fill: ${sub}; }
-      .lbl{ font: 500 13px system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, sans-serif; fill: ${sub}; letter-spacing:0.03em; }
-    </style>
-  </defs>
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="${w}" height="${h}"
+     viewBox="0 0 ${w} ${h}"
+     style="background:${bg};border-radius:12px;font-family:Inter,system-ui">
+  <style>
+    .title   { fill:${textCol}; font-size:24px; font-weight:600; font-family:Inter, system-ui; }
+    .sub     { fill:${subCol};  font-size:14px; font-weight:500; font-family:Inter, system-ui; }
+    .metricH { fill:${textCol}; font-size:20px; font-weight:600; font-family:Inter, system-ui; }
+    .metricV { fill:${textCol}; font-size:24px; font-weight:600; font-family:Inter, system-ui; }
+    .metricS { fill:${subCol};  font-size:14px; font-weight:500; font-family:Inter, system-ui; }
 
-  <rect width="${W}" height="${H}" fill="${panel}"/>
-  <g>
-    <rect x="20" y="20" width="${W-40}" height="${H-40}" rx="22" fill="${card}" stroke="${grid}" stroke-width="1"/>
+    .barLabel { fill:${textCol}; font-size:14px; font-weight:500; font-family:Inter, system-ui; }
+    .barText  { fill:${textCol}; font-size:14px; font-weight:500; font-family:Inter, system-ui; text-anchor:middle; }
 
-    <!-- header left -->
-    <text x="${x0}" y="64" class="t">${title}</text>
-    <text x="${x0}" y="88" class="s">Updated: ${updated.toLocaleString()}</text>
+    .dkpLeftLabel { fill:${textCol}; font-size:16px; font-weight:500; font-family:Inter, system-ui; }
+  </style>
 
-    <!-- header metrics row -->
-    <g transform="translate(${x0},120)">
-      <text class="s">Power</text>
-      <text y="24" class="t">${nf(latest?.power)}</text>
-      <text y="46" class="m" style="fill:${cPow}">${fmtDelta(dPower)}</text>
-    </g>
+  <!-- Header row -->
+  <g transform="translate(24,36)">
+    <text class="title">
+      ${player.name} (${player.id})
+    </text>
 
-    <g transform="translate(${x0+210},120)">
-      <text class="s">Kill points</text>
-      <text y="24" class="t">${nf(killPointsNow)}</text>
-      <text y="46" class="m" style="fill:${cKills}">${fmtDelta(dKills)}</text>
-    </g>
-
-    <g transform="translate(${x0+420},120)">
-      <text class="s">Dead</text>
-      <text y="24" class="t">${nf(latest?.dead)}</text>
-      <text y="46" class="m" style="fill:${cDead}">${fmtDelta(dDead)}</text>
-    </g>
-
-    <g transform="translate(${x0+630},120)">
-      <text class="s">T5</text>
-      <text y="24" class="t">${nf(latest?.t5)}</text>
-      <text y="46" class="m" style="fill:${cT5}">${fmtDelta(dT5)}</text>
-    </g>
-
-    <g transform="translate(${x0+820},120)">
-      <text class="s">T4</text>
-      <text y="24" class="t">${nf(latest?.t4)}</text>
-      <text y="46" class="m" style="fill:${cT4}">${fmtDelta(dT4)}</text>
-    </g>
-
-    <!-- DKP% top-right -->
-    <text x="${W-50}" y="62" text-anchor="end" class="b">${pct1(
-    pctDKP_raw
-  )}%</text>
-    <text x="${W-50}" y="88" text-anchor="end" class="tg">${autoTag(
-    pctDKP_raw
-  )}</text>
-
-    <!-- Progress bars -->
-    ${barRow({
-      label: "KP",
-      pct: pctKills,
-      cur: r?.d_kills || 0,
-      goal: dispGoalKills,
-      y: yBase,
-    })}
-
-    ${barRow({
-      label: "Dead",
-      pct: pctDead,
-      cur: r?.d_dead || 0,
-      goal: dispGoalDead,
-      y: yBase + GAP,
-    })}
-
-    ${barRow({
-      label: "DKP",
-      pct: pctDKP,
-      cur: r?.dkp || 0,
-      goal: dispGoalDkp,
-      y: yBase + GAP * 2,
-    })}
-
-    <!-- bottom two cards: LEFT / LAST FIGHTS -->
-    <g transform="translate(${x0}, ${bottomY})">
-      <text x="0" y="0" class="lbl">LEFT</text>
-      <rect x="0" y="16" width="${bottomBoxW}" height="${bottomBoxH}" rx="${bottomBoxR}" fill="${track}"/>
-      <text x="16" y="52" class="m">KP ${nf(killsLeft)} • Dead ${nf(
-    deadLeft
-  )}</text>
-    </g>
-
-    <g transform="translate(${secondBoxX}, ${bottomY})">
-      <text x="0" y="0" class="lbl">YOUR LAST FIGHTS AT "${zoneName}" ZONE</text>
-      <rect x="0" y="16" width="${bottomBoxW}" height="${bottomBoxH}" rx="${bottomBoxR}" fill="${track}"/>
-      <text x="16" y="52" class="m">KP ${nf(lastKillsZone)} • Dead ${nf(
-    lastDeadZone
-  )}</text>
-    </g>
-
-    <!-- DKP left -->
-    <g transform="translate(${x0}, ${bottomY + bottomBoxH + 60})">
-      <text class="mm">DKP left: ${nf(dkpLeft)}</text>
-    </g>
-
+    <text y="28" class="sub">
+      Updated: ${updatedAtStr}
+    </text>
   </g>
-</svg>`;
+
+  <!-- Warm up % -->
+  <g transform="translate(${w-140},36)" text-anchor="end">
+    <text fill="${textCol}" font-size="40" font-weight="600"
+          font-family="Inter, system-ui">
+      ${Math.round(warmUpPct)}%
+    </text>
+    <text y="32" fill="${subCol}" font-size="14" font-weight="600"
+          font-family="Inter, system-ui" letter-spacing="0.08em">
+      WARM UP
+    </text>
+  </g>
+
+  <!-- top metrics row -->
+  <g transform="translate(24,100)">
+    <!-- Power -->
+    <g>
+      <text class="metricH" x="0"  y="0">Power</text>
+      <text class="metricV" x="0"  y="30">${nf(player.power)}</text>
+      <text class="metricS" x="0"  y="48">±0</text>
+    </g>
+
+    <!-- KP (kill points total) -->
+    <g transform="translate(200,0)">
+      <text class="metricH" x="0"  y="0">Kill points</text>
+      <text class="metricV" x="0"  y="30">${nf(player.kp)}</text>
+      <text class="metricS" x="0"  y="48">±0</text>
+    </g>
+
+    <!-- Dead -->
+    <g transform="translate(400,0)">
+      <text class="metricH" x="0"  y="0">Dead</text>
+      <text class="metricV" x="0"  y="30">${nf(player.dead)}</text>
+      <text class="metricS" x="0"  y="48">±0</text>
+    </g>
+
+    <!-- T5 -->
+    <g transform="translate(600,0)">
+      <text class="metricH" x="0"  y="0">T5</text>
+      <text class="metricV" x="0"  y="30">${nf(player.t5)}</text>
+      <text class="metricS" x="0"  y="48">±0</text>
+    </g>
+
+    <!-- T4 -->
+    <g transform="translate(760,0)">
+      <text class="metricH" x="0"  y="0">T4</text>
+      <text class="metricV" x="0"  y="30">${nf(player.t4)}</text>
+      <text class="metricS" x="0"  y="48">±0</text>
+    </g>
+  </g>
+
+  <!-- Progress bars block -->
+  <g transform="translate(0,190)">
+    <!-- KP bar -->
+    <g transform="translate(0,0)">
+      <text class="barLabel" x="${barX}" y="-8">KP</text>
+
+      <!-- bg -->
+      <rect x="${barX}" y="0" width="${barW}" height="${barH}" rx="4"
+            fill="${barBg}"/>
+      <!-- fill -->
+      <rect x="${barX}" y="0" width="${(barW * pctKills/100).toFixed(1)}"
+            height="${barH}" rx="4"
+            fill="${barFill}"/>
+
+      <!-- text in middle -->
+      <text class="barText"
+            x="${barX + barW/2}"
+            y="${barH/2 + 4}">
+        ${Math.floor(pctKills)}%
+      </text>
+
+      <!-- numbers under -->
+      <text class="barLabel"
+            x="${barX}" y="${barH+20}">
+        ${nf(progress.d_kills)} / ${nf(goal.goal_kills)}
+      </text>
+    </g>
+
+    <!-- Dead bar -->
+    <g transform="translate(0,${barGapY})">
+      <text class="barLabel" x="${barX}" y="-8">Dead</text>
+
+      <rect x="${barX}" y="0" width="${barW}" height="${barH}" rx="4"
+            fill="${barBg}"/>
+      <rect x="${barX}" y="0" width="${(barW * pctDead/100).toFixed(1)}"
+            height="${barH}" rx="4"
+            fill="${barFill}"/>
+      <text class="barText"
+            x="${barX + barW/2}"
+            y="${barH/2 + 4}">
+        ${Math.floor(pctDead)}%
+      </text>
+
+      <text class="barLabel"
+            x="${barX}" y="${barH+20}">
+        ${nf(progress.d_dead)} / ${nf(goal.goal_dead)}
+      </text>
+    </g>
+
+    <!-- DKP bar -->
+    <g transform="translate(0,${barGapY*2})">
+      <text class="barLabel" x="${barX}" y="-8">DKP</text>
+
+      <rect x="${barX}" y="0" width="${barW}" height="${barH}" rx="4"
+            fill="${barBg}"/>
+      <rect x="${barX}" y="0" width="${(barW * pctDKP/100).toFixed(1)}"
+            height="${barH}" rx="4"
+            fill="${barFill}"/>
+      <text class="barText"
+            x="${barX + barW/2}"
+            y="${barH/2 + 4}">
+        ${Math.floor(pctDKP)}%
+      </text>
+
+      <text class="barLabel"
+            x="${barX}" y="${barH+20}">
+        ${nf(progress.d_dkp)} / ${nf(goal.goal_dkp)}
+      </text>
+    </g>
+  </g>
+
+  <!-- Bottom LEFT box -->
+  <g transform="translate(${leftBoxX}, ${bottomY})">
+    <text x="0" y="0"
+          font-family="Inter, system-ui"
+          font-size="14"
+          fill="${subCol}"
+          font-weight="500"
+          >LEFT</text>
+
+    <rect x="0" y="16"
+          width="${boxW}" height="${boxH}"
+          rx="${boxR}"
+          fill="${barBg}"/>
+
+    <text x="16" y="52"
+          font-family="Inter, system-ui"
+          font-size="18"
+          fill="${textCol}"
+          font-weight="500">
+      KP ${nf(killsLeft)} • Dead ${nf(deadLeft)}
+    </text>
+  </g>
+
+  ${lastZoneBox}
+
+  <!-- DKP left -->
+  <g transform="translate(${leftBoxX}, ${bottomY + boxH + 60})">
+    <text class="dkpLeftLabel">
+      DKP left: ${nf(dkpLeft)}
+    </text>
+  </g>
+
+</svg>
+`;
 }
 
 async function renderStripeCard(bundle, latest) {
