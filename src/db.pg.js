@@ -172,16 +172,11 @@ function toNumOrNull(v) {
 }
 
 function normalizeStatsForDb(s) {
-  // s може бути такого вигляду:
-  // {
-  //   id, name, power, dead,
-  //   kills: {t1,t2,t3,t4,t5}    <-- старий формат
-  // } або
-  // {
-  //   id, name, power, dead,
-  //   kills_by_tier: {t1..t5},
-  //   kills: <число>             <-- вже пораховане
-  // }
+  // Очікуємо:
+  // s.kills  --> це ВЖЕ kill points (KP), повне число
+  // s.t1..t5 (або s.kills_by_tier) --> деталізація
+  //
+  // Якщо с.kills немає або воно не число, тоді як fallback беремо t4+t5.
 
   const tierObj = s.kills_by_tier || s.kills || {};
 
@@ -191,19 +186,14 @@ function normalizeStatsForDb(s) {
   const t4 = toNumOrNull(tierObj.t4);
   const t5 = toNumOrNull(tierObj.t5);
 
-  // kills в основній колонці = T4 + T5
-  let killsNum;
-  if (Number.isFinite(Number(s.kills))) {
-    // якщо вже дали як число
-    killsNum = Number(s.kills);
-  } else {
-    const sumT4T5 = (toNumOrNull(t4) ?? 0) + (toNumOrNull(t5) ?? 0);
-    // якщо обидва були null => sumT4T5 === 0, але реально даних нема,
-    // тож хай буде null замість 0 щоб не псувати статистику
-    killsNum =
-      (t4 === null && t5 === null)
-        ? null
-        : sumT4T5;
+  // killsNum = kill points (як прийшло з OCR в s.kills)
+  let killsNum = toNumOrNull(s.kills);
+
+  // fallback: якщо kill points не прочиталось, тоді хоча б t4+t5
+  if (killsNum === null) {
+    if (t4 !== null || t5 !== null) {
+      killsNum = (t4 ?? 0) + (t5 ?? 0);
+    }
   }
 
   return {
@@ -215,7 +205,7 @@ function normalizeStatsForDb(s) {
     t3,
     t4,
     t5,
-    killsNum,
+    killsNum,   // <-- це тепер KP
     dkp: toNumOrNull(s.dkp)
   };
 }
@@ -323,6 +313,29 @@ export async function loadCursor(run_id) {
 }
 
 // ---------------- KvK helpers ----------------
+function pickGoalsByPower(rawPower) {
+  const p = Number(rawPower || 0); // абсолютне число, типу 77_970_457
+  const mil = p / 1_000_000;       // у мільйонах для діапазонів
+
+  // Йдемо зверху вниз
+  if (mil >= 130) return { goal_kills: 35_000_000, goal_dead: 2_500_000 };
+  if (mil >= 120) return { goal_kills: 34_000_000, goal_dead: 2_000_000 };
+  if (mil >= 110) return { goal_kills: 33_000_000, goal_dead: 1_800_000 };
+  if (mil >= 100) return { goal_kills: 32_000_000, goal_dead: 1_650_000 };
+  if (mil >= 95)  return { goal_kills: 30_000_000, goal_dead: 1_500_000 };
+  if (mil >= 90)  return { goal_kills: 29_000_000, goal_dead: 1_400_000 };
+  if (mil >= 85)  return { goal_kills: 28_000_000, goal_dead: 1_000_000 };
+  if (mil >= 80)  return { goal_kills: 28_000_000, goal_dead:   850_000 };
+  if (mil >= 75)  return { goal_kills: 27_000_000, goal_dead:   800_000 };
+  if (mil >= 70)  return { goal_kills: 24_000_000, goal_dead:   750_000 };
+  if (mil >= 65)  return { goal_kills: 20_000_000, goal_dead:   700_000 };
+  if (mil >= 60)  return { goal_kills: 16_000_000, goal_dead:   650_000 };
+  if (mil >= 55)  return { goal_kills: 13_000_000, goal_dead:   600_000 };
+  if (mil >= 50)  return { goal_kills:  8_000_000, goal_dead:   550_000 };
+  if (mil >= 45)  return { goal_kills:  5_000_000, goal_dead:   500_000 };
+  // <45
+  return               { goal_kills:  4_000_000, goal_dead:   450_000 };
+}
 export async function kvkStart(name = null) {
   const { rows } = await pool.query(
     `INSERT INTO kvk_periods(name) VALUES ($1) RETURNING kvk_id`,
@@ -368,7 +381,7 @@ export async function kvkEnsureGoal(player_id) {
   const kvk_id = await kvkActiveId();
   if (!kvk_id) return null;
 
-  // вже є?
+  // вже існує?
   const { rows } = await pool.query(
     `SELECT 1 FROM kvk_goals
       WHERE kvk_id=$1 AND player_id=$2`,
@@ -376,7 +389,7 @@ export async function kvkEnsureGoal(player_id) {
   );
   if (rows.length) return null;
 
-  // беремо останні значення з latest
+  // беремо latest по цьому гравцю
   const { rows: lrows } = await pool.query(
     `SELECT * FROM latest WHERE player_id=$1`,
     [player_id]
@@ -384,7 +397,7 @@ export async function kvkEnsureGoal(player_id) {
   if (!lrows.length) return null;
   const l = lrows[0];
 
-  // зчитати ваги
+  // конфіг з вагами
   const { rows: cr } = await pool.query(
     `SELECT kills_weight, dead_to_kills
        FROM kvk_config
@@ -393,12 +406,13 @@ export async function kvkEnsureGoal(player_id) {
   );
   const cfg = cr[0];
 
-  // авто-цілі від power
-  const goal_kills = Math.round(2.2 * Number(l.power || 0));
-  const goal_dead  = Math.round(Number(l.power || 0) / 87);
-  const goal_dkp   = Math.round(
-    cfg.kills_weight * goal_kills +
-    cfg.dead_to_kills * goal_dead
+  // цілі з твоєї таблиці
+  const { goal_kills, goal_dead } = pickGoalsByPower(l.power);
+
+  // розрахунок DKP цілі
+  const goal_dkp = Math.round(
+    Number(cfg.kills_weight)   * goal_kills +
+    Number(cfg.dead_to_kills)  * goal_dead
   );
 
   // стартові значення = поточні latest
@@ -420,7 +434,7 @@ export async function kvkEnsureGoal(player_id) {
     goal_dead,
     goal_dkp,
     l.power||0,
-    l.kills||0,
+    l.kills||0, // kills тепер KP
     l.dead||0,
     l.t1||0, l.t2||0, l.t3||0, l.t4||0, l.t5||0
   ]);

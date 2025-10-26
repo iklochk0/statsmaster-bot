@@ -380,36 +380,31 @@ function stripeCardSVG(bundle, latest) {
   const panel = "#0f1218", card = "#121722", grid = "#1e2633", text = "#e6edf7", sub = "#a9b4c6";
   const track = "#2b3342", color1 = "#00c853", color2 = "#7c4dff";
 
-  // DKP%
   const pctDKP_raw = Number(r?.pct) || 0;
-  const pctDKP     = clamp(pctDKP_raw, 0, 220);
+  const pctKills = clamp(((Number(r?.d_kills)||0) / (Number(r?.goal_kills)||0) * 100) || 0, 0, 220);
+  const pctDead  = clamp(((Number(r?.d_dead)||0)  / (Number(r?.goal_dead)||0)  * 100) || 0, 0, 220);
+  const pctDKP   = pctDKP_raw;
 
-  // прогрес по kills/dead
-  const pctKills = clamp(
-    ((Number(r?.d_kills)||0) / (Number(r?.goal_kills)||0) * 100) || 0,
-    0, 220
-  );
-  const pctDead  = clamp(
-    ((Number(r?.d_dead)||0) / (Number(r?.goal_dead)||0) * 100) || 0,
-    0, 220
-  );
+  // без округлень, як є
+  const dispGoalKills = Number(r?.goal_kills || 0);
+  const dispGoalDead  = Number(r?.goal_dead  || 0);
+  const dispGoalDkp   = Number(r?.goal_dkp   || 0);
 
-  // залишилось
-  const killsLeft = Number(r?.killsLeft || 0);
-  const deadLeft  = Number(r?.deadLeft  || 0);
-  const dkpLeft   = Number(r?.dkpLeft   || 0);
+  // Left
+  const killsLeft = Math.max(0, dispGoalKills - Number(r?.d_kills||0));
+  const deadLeft  = Math.max(0, dispGoalDead  - Number(r?.d_dead ||0));
+  const dkpLeft   = Math.max(0, dispGoalDkp   - Number(r?.dkp    ||0));
 
-  // остання зона
+  // Last zone (як у нас уже було)
   const zoneName      = r?.lastZone?.zoneName ?? "–";
   const lastKillsZone = Number(r?.lastZone?.dKillsZone || 0);
   const lastDeadZone  = Number(r?.lastZone?.dDeadZone  || 0);
 
-  // шапка
   const title   = latest?.name ? `${latest.name} (${latest.player_id})` : String(latest?.player_id ?? "");
   const updated = latest?.updated_at ? new Date(latest.updated_at) : new Date();
 
-  // kills в шапці: scaled (kills/10 округлено до 100к)
-  const scaledKillsNow = scaleKillsDisplay(latest?.kills);
+  // ВАЖЛИВО: тепер Kill Points показуємо latest.kills як є
+  const killPointsNow = Number(latest?.kills || 0);
 
   // геометрія
   const x0 = 50;
@@ -491,8 +486,8 @@ function stripeCardSVG(bundle, latest) {
     </g>
 
     <g transform="translate(${x0+210},120)">
-      <text class="s">Kills (scaled)</text>
-      <text y="24" class="t">${nf(scaledKillsNow)}</text>
+      <text class="s">Kill points</text>
+      <text y="24" class="t">${nf(killPointsNow)}</text>
       <text y="46" class="m" style="fill:${cKills}">${fmtDelta(dKills)}</text>
     </g>
 
