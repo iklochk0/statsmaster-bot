@@ -1061,6 +1061,7 @@ client.on("messageCreate", async (msg) => {
     /* KvK admin commands */
 
     if (cmd === "kvk" && args[0] === "start") {
+      await initSchema();
       const name = args.slice(1).join(" ") || null;
       const id = await kvkStart(name);
       return void msg.reply(

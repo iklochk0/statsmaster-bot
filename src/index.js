@@ -2,7 +2,7 @@
 // CityHall25 scanner бот
 // - відкриття профілів по списку
 // - OCR полів (id, name, power, kp, t1..t5, dead, etc.)
-// - вставка в Postgres через db.pg.js (saveScan)
+// - вставка в Postgres через db.pg.js
 // - KvK автогоал (ТІЛЬКИ в baseline режимі `npm run scan`)
 // - random fake swipe у "смертях"
 // - подвійні тапи (copyName + закриття смертей) з довшою рандомною паузою (0.5-1.1s)
@@ -35,7 +35,8 @@ import { navigate, sleep } from "./emu.js";
 import {
   initSchema,
   beginRun,
-  saveScan,          // <── НОВЕ
+  upsertPlayer,
+  insertStats,
   kvkEnsureGoal,
   kvkActiveId,
   closeDb,
@@ -650,10 +651,11 @@ async function scanProfileOnce() {
   // {
   //   id, name,
   //   power,
-  //   kp,        <-- Kill Points TOTAL
+  //   kp,        <-- Kill Points (ОБОВ'ЯЗКОВО)
   //   dead,
   //   t1,t2,t3,t4,t5
   // }
+  // (kills як "тільки t4+t5" нам вже не потрібен)
   const parsed = parseStats(texts);
   logAction("scanProfileOnce-result", { parsed });
   return parsed;
@@ -815,7 +817,7 @@ async function main() {
       console.log(`   Save ${pid} "${stats.name || ""}"`);
       logAction("save-player", { pid, name: stats.name || "" });
 
-      // одна функція замість upsertPlayer + insertStats
+      // запис у БД
       await saveScan(run_id, stats);
 
       // цілі створюємо тільки у baseline режимі
