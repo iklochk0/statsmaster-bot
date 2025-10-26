@@ -1,13 +1,24 @@
 // src/index.js
 // CityHall25 scanner бот
 // - відкриття профілів по списку
-// - OCR полів (id, name, power, kills tiers, dead, etc.)
+// - OCR полів (id, name, power, kp, t1..t5, dead, etc.)
 // - вставка в Postgres через db.pg.js
-// - KvK автогоал
+// - KvK автогоал (ТІЛЬКИ в baseline режимі `npm run scan`)
 // - random fake swipe у "смертях"
-// - подвійні тапи (copyName + закриття смертей) з рандомним інтервалом
-// - зона start/finish (zoneName як текст)
-// - додатковий settle ~0.5s перед OCR щоб екран встиг прогрузитись
+// - подвійні тапи (copyName + закриття смертей) з довшою рандомною паузою (0.5-1.1s)
+// - зона start/finish (zoneName як текст): зберігаємо run_id як start_run_id / end_run_id
+// - додаткова settle пауза перед OCR щоб екран встиг прогрузитись
+//
+// CLI режими:
+//   baseline KvK snapshot / створює цілі:
+//     npm run scan
+//
+//   бій (зона):
+//     npm run scan zone "4" start
+//     npm run scan zone "4" finish
+//
+// baseline робить kvkEnsureGoal() для кожного гравця;
+// zone start / zone finish НЕ створюють goals, просто фіксують run_id зони.
 
 import "dotenv/config";
 import fs from "fs/promises";
@@ -31,7 +42,7 @@ import {
   closeDb,
   zoneStart,
   zoneFinish,
-  getZone
+  getZone,
 } from "./db.pg.js";
 
 /* ===================== Paths & Config ===================== */
@@ -41,7 +52,7 @@ const ROOT_DIR   = path.resolve(__dirname, "..");
 const OUT_DIR    = path.join(ROOT_DIR, "out");
 await fs.mkdir(OUT_DIR, { recursive: true }).catch(() => {});
 
-const UI   = JSON.parse(await fs.readFile(new URL("./ui.json",     import.meta.url), "utf-8"));
+const UI   = JSON.parse(await fs.readFile(new URL("./ui.json",      import.meta.url), "utf-8"));
 const CFG  = JSON.parse(await fs.readFile(new URL("./regions.json", import.meta.url), "utf-8"));
 const FLOW = UI.flow;
 const LIST = UI.cityHallList;
@@ -55,18 +66,27 @@ const SAFE = UI.screen?.safe ?? { left: 0, top: 0, width: 1280, height: 720 };
 const ANCHOR_CITYHALL = UI.anchors?.cityHall ?? { left: 520, top: 110, width: 260, height: 60 };
 
 /* ===================== Timings ===================== */
-const T_SETTLE = Number(FLOW.settleMs ?? 700);
+/**
+ * ми робимо бота повільнішим і "людським":
+ *  - settle ~1s
+ *  - паузи між натисками довші
+ *  - паузи між профілями 1-2с
+ */
+const T_SETTLE = Number(FLOW.settleMs ?? 1000);
 const T_JITTER = () => 150 + Math.floor(Math.random() * 250);
+
 const T_OCR_NAME_GUESS = 220;
 const T_CLIP_STEP  = 180;
 const T_CLIP_ADB   = 2500;
 const T_CLIP_HOST  = 3000;
 const T_LONGPRESS  = 360;
 
-const PRE_SCAN_SETTLE_MS = 500; // додаткова пауза перед OCR профілю
+// додаткова пауза перед OCR профілю
+const PRE_SCAN_SETTLE_MS = 800;
 
-const SCAN_PAUSE_MIN_MS = Number(process.env.SCAN_PAUSE_MIN_MS || 900);
-const SCAN_PAUSE_MAX_MS = Number(process.env.SCAN_PAUSE_MAX_MS || 1800);
+// скільки чекати між профілями
+const SCAN_PAUSE_MIN_MS = Number(process.env.SCAN_PAUSE_MIN_MS || 1000);
+const SCAN_PAUSE_MAX_MS = Number(process.env.SCAN_PAUSE_MAX_MS || 2000);
 
 // якщо хочеш супер-стабільно тиснути один піксель — лиш RAND_PX=0
 const RAND_PX = Number(process.env.RAND_PX || 0);
@@ -116,8 +136,14 @@ function arg(name, def) {
 const COUNT = Number(arg("count", "40"));
 
 // позиційні аргументи для зон:
+//
+// baseline KvK snapshot:
+//   node src/index.js
+//
+// zone snapshot:
 //   node src/index.js zone "Kingsland push" start
 //   node src/index.js zone "Kingsland push" finish
+//
 const POSITIONAL = process.argv.slice(2);
 let ZONE_MODE = null; // { name: <string>, mode: "start"|"finish" }
 if (POSITIONAL[0] === "zone" && POSITIONAL.length >= 3) {
@@ -130,6 +156,8 @@ if (POSITIONAL[0] === "zone" && POSITIONAL.length >= 3) {
     console.warn(`Zone args ignored (expected: zone "<name>" start|finish)`);
   }
 }
+// baseline режим = немає ZONE_MODE
+const BASELINE_MODE = !ZONE_MODE;
 
 /* ===================== ADB & geometry ===================== */
 function adbArgs(args) {
@@ -139,7 +167,7 @@ function adbArgs(args) {
   return a;
 }
 
-// Точний тап (ми юзаємо swipe x,y -> той самий x,y)
+// Точний тап (через swipe x,y -> x,y)
 async function adbTapExact(x, y, durMs = 120, meta = {}) {
   const xx = Math.round(x);
   const yy = Math.round(y);
@@ -202,7 +230,7 @@ function hasRect(a) {
 }
 
 function pickPointInRect(rect) {
-  // випадкова точка всередині rect у рамках SAFE
+  // випадкова точка всередині rect у межах SAFE
   const x = rect.left + randInt(0, Math.max(0, rect.width  - 1));
   const y = rect.top  + randInt(0, Math.max(0, rect.height - 1));
   return clampToSafe({ x, y });
@@ -230,6 +258,8 @@ async function fakeSwipeInDead() {
  *  - {type:"tap", rect:{left,top,width,height}, durMs}
  *  - {type:"tapRect", left, top, width, height, durMs}
  *  - масив таких дій
+ * Використовує adbTapExact із невеликим джитером,
+ * тому виглядає більш "людсько".
  */
 async function navigateHuman(actionOrArray) {
   const doOne = async (a) => {
@@ -243,7 +273,7 @@ async function navigateHuman(actionOrArray) {
       return;
     }
 
-    // tapRect сам по собі
+    // tapRect як є
     if (a.type === "tapRect" && hasRect(a)) {
       const p = pickPointInRect(a);
       logAction("tapRect", { rect: a, picked: p });
@@ -251,7 +281,7 @@ async function navigateHuman(actionOrArray) {
       return;
     }
 
-    // звичайний tap x/y
+    // простий tap x/y
     if (a.type === "tap" && Number.isFinite(a.x) && Number.isFinite(a.y)) {
       const base = clampToSafe({ x: a.x, y: a.y });
       const j = RAND_PX
@@ -261,7 +291,7 @@ async function navigateHuman(actionOrArray) {
       return;
     }
 
-    // fallback — віддати в navigate(..) як було
+    // fallback: викликаємо navigate(...) зі старого ui.json
     logAction("navigate-pass", { raw: a });
     await navigate(a);
   };
@@ -285,7 +315,6 @@ async function ocrField(key, buf) {
 }
 
 /* ===================== Geometry (CH level col) ===================== */
-// для визначення рівня City Hall (25 чи ні)
 function rowRefY(i) {
   const r = LIST.rows[i];
   if (!r) throw new Error(`ui.cityHallList.rows[${i}] missing`);
@@ -344,7 +373,7 @@ function regionNameCenter() {
   if (!r) return null;
   return {
     x: Math.round(r.left + r.width / 2),
-    y: Math.round(r.top + r.height / 2)
+    y: Math.round(r.top + r.height / 2),
   };
 }
 function actionCopyFromRegions() {
@@ -365,6 +394,7 @@ async function isProfileScreen() {
   if (idDigits.length >= 5) return true;
 
   const powRaw    = rois.power ? (await ocrBuffer(rois.power, DIGITS)).trim() : "";
+  // kills OR kp
   const killsRaw  = rois.kills
     ? (await ocrBuffer(rois.kills, DIGITS)).trim()
     : (rois.kp
@@ -480,7 +510,8 @@ async function waitClipboardNonEmptyHost(prev = "", maxMs = T_CLIP_HOST, stepMs 
   return "";
 }
 
-// подвійний тап по імені з рандомною паузою, потім читаємо буфер
+// подвійний тап по імені (copyName) з довшою паузою між тапами (0.5–1.1с),
+// потім читаємо буфер
 async function copyNameIntoTexts(texts) {
   await clipboardSetEmptyADB();
   let hostPrev = "";
@@ -501,8 +532,8 @@ async function copyNameIntoTexts(texts) {
     await adbTapExact(p.x, p.y, 120);
   }
 
-  // невеликий рандом до 1с
-  await sleepLog(randMs(100, 1000), "between name taps");
+  // більш довга людська пауза (щоб гра гарантовано оновила виділення)
+  await sleepLog(randMs(500, 1100), "between name taps");
 
   // Тап #2
   if (action) {
@@ -522,7 +553,7 @@ async function copyNameIntoTexts(texts) {
     clip = await waitClipboardNonEmptyHost(hostPrev, T_CLIP_HOST, T_CLIP_STEP);
   }
 
-  // fallback: longpress + COPY keyevent
+  // fallback: longpress + KEYCODE_COPY
   if (!clip && p) {
     try {
       const x = Math.round(p.x), y = Math.round(p.y);
@@ -556,7 +587,7 @@ async function copyNameIntoTexts(texts) {
 
 /* ===================== Profile scan ===================== */
 async function scanProfileOnce() {
-  // додаткова пауза щоб екран профілю точно повністю відмалювався
+  // трішки чекаємо щоб профіль точно відмалювався
   await sleepLog(PRE_SCAN_SETTLE_MS, "pre-scan settle");
 
   const texts = {};
@@ -565,7 +596,7 @@ async function scanProfileOnce() {
 
   for (const page of CFG.pages) {
     // На "bottom" іноді робимо фейкові свайпи (імітуємо скрол смертей),
-    // але не КОЖЕН раз, а тільки якщо пройшло FAKE_SWIPE_PROB
+    // але не КОЖЕН раз
     if (page.name === "bottom") {
       if (Math.random() < FAKE_SWIPE_PROB) {
         await fakeSwipeInDead();
@@ -585,7 +616,7 @@ async function scanProfileOnce() {
           const guess = await ocrField(k, buf);
           if (guess) texts.name = guess;
         } else {
-          // читаємо просто для логів
+          // просто для логів
           await ocrField(k, buf);
         }
       } else {
@@ -601,7 +632,7 @@ async function scanProfileOnce() {
     }
   }
 
-  // safety: якщо id підглючив, перепробуємо верхню сторінку ще раз
+  // safety: якщо id погано розпізнався — перепробуємо верхню сторінку
   const idDigits = (texts.id || "").replace(/\D/g, "");
   if (!idDigits || idDigits.length < 5) {
     const first = CFG.pages[0];
@@ -616,6 +647,15 @@ async function scanProfileOnce() {
     }
   }
 
+  // parseStats має скласти об'єкт:
+  // {
+  //   id, name,
+  //   power,
+  //   kp,        <-- Kill Points (ОБОВ'ЯЗКОВО)
+  //   dead,
+  //   t1,t2,t3,t4,t5
+  // }
+  // (kills як "тільки t4+t5" нам вже не потрібен)
   const parsed = parseStats(texts);
   logAction("scanProfileOnce-result", { parsed });
   return parsed;
@@ -661,15 +701,16 @@ async function isCityHallList() {
   return ok;
 }
 
-// повернення назад у список (закрити "мертві"/деталі → закрити повністю)
-// тепер: подвійний тап по closeDeath
+// повернення назад у список:
+//  1) подвійний тап по closeDeath (з паузою 0.5-1.1с)
+//  2) закрити профіль
 async function backToCityHallList() {
-  // перший тап по кнопці, яка закриває блок зі смертями
+  // перший тап по кнопці, яка закриває "мертві"/деталі
   logAction("back", { step: "closeDeath#1" });
   await navigateHuman(FLOW.closeDeath);
 
-  // рандомна пауза до 1с
-  await sleepLog(randMs(100, 1000), "between closeDeath taps");
+  // довша рандомна пауза
+  await sleepLog(randMs(500, 1100), "between closeDeath taps");
 
   // другий тап — якщо перший не спрацював / гра лагнула
   logAction("back", { step: "closeDeath#2" });
@@ -730,12 +771,13 @@ async function main() {
   const backupRunPath = path.join(OUT_DIR, `run-${run_id}.json`);
   await fs.writeFile(backupRunPath, "[]").catch(() => {});
 
+  // заходимо в рейтинг → City Hall list
   await openCityHallList();
   await humanPause();
 
   let visited = 0;
 
-  // ---- ФАЗА 1: індекси 0..BASE_ROW_IDX-1 (типу "розігрів") ----
+  // ---- ФАЗА 1: індекси 0..BASE_ROW_IDX-1 (розігрів) ----
   for (
     let i = 0;
     i < Math.min(BASE_ROW_IDX, LIST.rows.length) && visited < COUNT;
@@ -769,18 +811,24 @@ async function main() {
     const stats = await scanProfileOnce();
     const stamp = { run_id, at: new Date().toISOString(), stats };
 
+    // отримати player_id
     const pid = Number(String(stats?.id || "").replace(/\D/g, ""));
     if (Number.isFinite(pid) && String(pid).length >= 5) {
       console.log(`   Save ${pid} "${stats.name || ""}"`);
       logAction("save-player", { pid, name: stats.name || "" });
+
+      // запис у БД
       await upsertPlayer({ id: pid, name: stats.name || "" });
       await insertStats(run_id, pid, stats);
 
-      try {
-        const res = await kvkEnsureGoal(pid);
-        if (res) logAction("kvkEnsureGoal", { pid, res });
-      } catch (e) {
-        logAction("kvkEnsureGoal-error", { pid, error: e?.message || String(e) });
+      // цілі створюємо тільки у baseline режимі
+      if (BASELINE_MODE) {
+        try {
+          const res = await kvkEnsureGoal(pid);
+          if (res) logAction("kvkEnsureGoal", { pid, res });
+        } catch (e) {
+          logAction("kvkEnsureGoal-error", { pid, error: e?.message || String(e) });
+        }
       }
 
       await appendBackup(backupAllPath, stamp);
@@ -802,7 +850,7 @@ async function main() {
     await maybeIdlePause();
   }
 
-  // ---- ФАЗА 2: крутимось навколо BASE_ROW_IDX із fallback 6→7 ----
+  // ---- ФАЗА 2: крутимось навколо BASE_ROW_IDX із fallback 5→6→7 ----
   while (visited < COUNT) {
     await maybeIdlePause();
 
@@ -822,14 +870,17 @@ async function main() {
     if (Number.isFinite(pid) && String(pid).length >= 5) {
       console.log(`   Save ${pid} "${stats.name || ""}"`);
       logAction("save-player", { pid, name: stats.name || "" });
+
       await upsertPlayer({ id: pid, name: stats.name || "" });
       await insertStats(run_id, pid, stats);
 
-      try {
-        const res = await kvkEnsureGoal(pid);
-        if (res) logAction("kvkEnsureGoal", { pid, res });
-      } catch (e) {
-        logAction("kvkEnsureGoal-error", { pid, error: e?.message || String(e) });
+      if (BASELINE_MODE) {
+        try {
+          const res = await kvkEnsureGoal(pid);
+          if (res) logAction("kvkEnsureGoal", { pid, res });
+        } catch (e) {
+          logAction("kvkEnsureGoal-error", { pid, error: e?.message || String(e) });
+        }
       }
 
       await appendBackup(backupAllPath, stamp);
@@ -863,23 +914,15 @@ async function main() {
 
   console.log(`Backups:\n  - ${path.relative(ROOT_DIR, backupAllPath)}\n  - ${path.relative(ROOT_DIR, backupRunPath)}`);
 
-  // зона логіка (якщо запустили в режимі zone "..." start/finish)
+  // зона логіка: якщо запущено як `zone "<name>" start|finish`
   if (ZONE_MODE) {
     try {
       if (ZONE_MODE.mode === "start") {
-        await zoneStart(ZONE_MODE.name, {
-          run_id,
-          visited,
-          finished_at: new Date().toISOString()
-        });
-        console.log(`Zone "${ZONE_MODE.name}": START stored`);
+        await zoneStart(ZONE_MODE.name, run_id);
+        console.log(`Zone "${ZONE_MODE.name}": START stored (run_id ${run_id})`);
       } else if (ZONE_MODE.mode === "finish") {
-        await zoneFinish(ZONE_MODE.name, {
-          run_id,
-          visited,
-          finished_at: new Date().toISOString()
-        });
-        console.log(`Zone "${ZONE_MODE.name}": FINISH stored`);
+        await zoneFinish(ZONE_MODE.name, run_id);
+        console.log(`Zone "${ZONE_MODE.name}": FINISH stored (run_id ${run_id})`);
       }
       const zr = await getZone(ZONE_MODE.name);
       console.log("Zone record:", zr);
