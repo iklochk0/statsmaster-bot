@@ -4,8 +4,8 @@
       "name": "top",
       "rois": {
         "id":    { "left": 575, "top": 144, "width": 87,  "height": 30 },
-        "power": { "left": 684, "top": 255, "width": 185, "height": 38 },
-        "kp":    { "left": 900, "top": 255, "width": 195, "height": 38 }
+        "power": { "left": 690, "top": 252, "width": 185, "height": 35 },
+        "kp":    { "left": 930, "top": 252, "width": 195, "height": 35 }
       },
       "actions": {
         "copyName": { "type": "tap", "rect": { "left": 480, "top": 170, "width": 70, "height": 25 }, "durMs": 300 }
@@ -16,16 +16,16 @@
       "name": "mid",
       "rois": {
   "t5": {
-    "left": 730,
-    "top": 471,
-    "width": 151,
-    "height": 30
+    "left": 732,
+    "top": 472,
+    "width": 166,
+    "height": 29
   },
   "t4": {
-    "left": 731,
-    "top": 435,
-    "width": 147,
-    "height": 30
+    "left": 733,
+    "top": 437,
+    "width": 165,
+    "height": 27
   },
   "t3": {
     "left": 735,
@@ -46,12 +46,12 @@
     "height": 27
   }
       },
-      "nav": { "type": "tap", "rect": { "left": 155, "top": 555, "width": 40, "height": 45 }, "durMs": 300 }
+      "nav": { "type": "tap", "rect": { "left": 175, "top": 570, "width": 40, "height": 45 }, "durMs": 300 }
     },
     {
       "name": "bottom",
       "rois": {
-        "dead":  { "left": 850, "top": 365, "width": 194, "height": 30 }
+        "dead":  { "left": 855, "top": 365, "width": 190, "height": 32 }
       },
       "nav": null
     }
