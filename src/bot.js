@@ -428,69 +428,95 @@ async function computeLastZoneDeltaForPlayer(playerId) {
    ВАЖЛИВО: тут ми більше НЕ передаємо BigInt прямо в pool.query.
    Ми конвертим айдішки в String(...) перед тим як сунути їх у SQL.
 */
+// Формує дані для картки гравця.
+// playerIdInput може бути string або BigInt, ми все одно кастимо в String()
+// щоб не ламати pg (pg не любить сирий BigInt у параметрах).
 async function buildZoneBasedKvkBundle(playerIdInput, latest) {
-  const pidStr = String(playerIdInput); // <- ключова зміна
-  const activeIdRaw = await kvkActiveId(); // може бути null або число/рядок
+  // гарантовано рядки перед SQL
+  const pidStr = String(playerIdInput);
+
+  // ID активного KvK (або null)
+  const activeIdRaw = await kvkActiveId();
   const activeId = activeIdRaw == null ? null : String(activeIdRaw);
 
+  // дефолти якщо для гравця ще нема goals
   let goalKills = 0;
-  let goalDead = 0;
-  let goalDKP = 0;
+  let goalDead  = 0;
+  let goalDKP   = 0;
+
+  // дефолтні ваги (про всяк)
   let cfg = { kills_weight: 1.0, dead_to_kills: 5.0 };
 
   if (activeId) {
-    // читаємо goal_kp як goal_kills
+    // 1) тягнемо goals для цього гравця
+    //    ТУТ МИ ВЖЕ ВИКОРИСТОВУЄМО goal_kills (ПРАВИЛЬНА КОЛОНКА),
+    //    а не goal_kp (якого нема)
     const { rows: gRows } = await pool.query(
-      `SELECT goal_kp, goal_dead, goal_dkp
+      `SELECT goal_kills, goal_dead, goal_dkp
          FROM kvk_goals
         WHERE kvk_id=$1 AND player_id=$2`,
-      [activeId, pidStr] // <-- тепер рядки, не BigInt
+      [activeId, pidStr]
     );
 
     if (gRows[0]) {
-      goalKills = Number(gRows[0].goal_kp || 0);   // наше goal_kills (T4+T5)
-      goalDead  = Number(gRows[0].goal_dead || 0);
-      goalDKP   = Number(gRows[0].goal_dkp || 0);
+      goalKills = Number(gRows[0].goal_kills || 0); // скільки Т4+Т5 треба набити
+      goalDead  = Number(gRows[0].goal_dead  || 0); // скільки треба злити
+      goalDKP   = Number(gRows[0].goal_dkp   || 0); // скільки DKP очікуємо
     }
 
+    // 2) тягнемо ваги DKP формули
     const { rows: cRows } = await pool.query(
       `SELECT kills_weight, dead_to_kills
          FROM kvk_config
         WHERE kvk_id=$1`,
-      [activeId] // <-- теж String
+      [activeId]
     );
     if (cRows[0]) {
       cfg = cRows[0];
     }
   }
 
-  // сума всього, що він реально зробив у завершених зонах
-  const zoneSum = await computeZoneSumForPlayer(pidStr);
+  // 3) підрахунок боїв:
+  //    computeZoneSumForPlayer сумує по ВСІХ завершених зонах
+  //    і повертає скільки гравець реально зробив.
+  //
+  //    zoneSum.dKills = сумарний приріст (t4+t5)
+  //    zoneSum.dDead  = сумарні втрати
+  //    zoneSum.dKp    = скільки Kill Points він набив
+  //    zoneSum.dPower / dT4 / dT5 і т.д. — для дельт у верхньому рядку картки
+  const zoneSum  = await computeZoneSumForPlayer(pidStr);
 
-  // його активність в останній зоні
+  // 4) остання завершена зона (для блоку "YOUR LAST FIGHTS AT ...")
   const lastZone = await computeLastZoneDeltaForPlayer(pidStr);
 
-  const killsDone = Number(zoneSum.dKills || 0); // T4+T5
-  const deadDone  = Number(zoneSum.dDead  || 0);
+  // 5) скільки вже зроблено
+  const killsDone = Number(zoneSum.dKills || 0); // приріст T4+T5
+  const deadDone  = Number(zoneSum.dDead  || 0); // приріст dead
 
-  // DKP формула
+  // 6) DKP формула
   const dkpDone = Math.round(
-    (Number(cfg.kills_weight || 0) * killsDone) +
-    (Number(cfg.dead_to_kills || 0) * deadDone)
+    (Number(cfg.kills_weight   || 0) * killsDone) +
+    (Number(cfg.dead_to_kills  || 0) * deadDone)
   );
 
+  // 7) скільки залишилось до цілей
   const killsLeft = Math.max(0, goalKills - killsDone);
   const deadLeft  = Math.max(0, goalDead  - deadDone);
   const dkpLeft   = Math.max(0, goalDKP   - dkpDone);
 
+  // 8) прогрес у відсотках
   const pctRaw = goalDKP > 0 ? (100 * dkpDone / goalDKP) : 0;
 
+  // 9) назва "бейджа" (WARM UP / ON TRACK / OVERDRIVE ...)
+  const tagText = autoTag(pctRaw);
+
+  // 10) готуємо пакет даних для рендера картки
   return {
-    latest, // рядок з latest (включно з updated_at)
+    latest, // snapshot з latest (power/kp/... + updated_at)
     goal: {
       kills: goalKills,
-      dead:  goalDead,
-      dkp:   goalDKP,
+      dead : goalDead,
+      dkp  : goalDKP,
     },
     progress: {
       killsDone,
@@ -500,12 +526,13 @@ async function buildZoneBasedKvkBundle(playerIdInput, latest) {
       deadLeft,
       dkpLeft,
       pct: pctRaw,
-      tag: autoTag(pctRaw),
+      tag: tagText,
     },
     lastZone, // { zoneName, dKillsZone, dDeadZone }
     zoneSum,  // { dPower, dKp, dKills, dDead, dT4, dT5 }
   };
 }
+
 
 /* ───────────────── Рендер картки гравця (SVG -> PNG) ───────────────── */
 
