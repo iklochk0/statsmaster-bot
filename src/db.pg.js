@@ -660,7 +660,7 @@ export async function kvkTop(limit = 10) {
   const { rows } = await pool.query(
     `SELECT *
      FROM kvk_progress
-     ORDER BY pct DESC
+     ORDER BY pct DESC, dkp DESC
      LIMIT $1`,
     [Math.min(Math.max(Number(limit) || 10, 1), 50)]
   );

@@ -958,73 +958,251 @@ function hashTopRows(rows) {
 }
 
 function kvkTopSVG(rows, meta = {}) {
+  // ---- стилі (як на картці гравця) ----
+  const panelBg     = "#0d121d";   // outer bg
+  const cardBg      = "#121722";   // card bg
+  const borderCol   = "#1e2633";   // card border
+  const textCol     = "#ffffff";   // main text
+  const subCol      = "#9da5bd";   // secondary text
+  const trackCol    = "#2a3142";   // bar track
+  const fillPrimary = "#6b7bff";   // 0..100%
+  const fillOver    = "#4deeea";   // 100..200%
+
+  // ---- геометрія ----
   const W = 1100;
-  const H = 120 + rows.length * 56 + 40;
+  const outerMargin = 24;      // від краю всього зображення до карти
 
-  const panel = "#0f1218";
-  const card = "#121722";
-  const grid = "#1e2633";
-  const text = "#e6edf7";
-  const sub = "#a9b4c6";
-  const track = "#2b3342";
-  const color1 = "#7c4dff";
+  const cardX = outerMargin;
+  const cardY = outerMargin;
+  const cardW = W - outerMargin * 2;
 
-  const marginX = 40;
-  const listLeft = marginX + 12;
-  const barLeft = 250;
-  const barWidth = W - barLeft - 85;
-  const padRight = 46;
-  const hBar = 20;
-  const rxy = 7;
-  const rowGap = 56;
-  const yStart = 120;
+  const headerH    = 60;       // висота хедера всередині карти
+  const gapAfterH  = 20;       // відступ після хедера перед списком
+  const rowGap     = 70;       // висота одного рядка топа
+  const bottomPad  = 40;       // падінг знизу карти всередині
+
+  // бар усередині рядка
+  const innerPadX  = 32;       // падінг контенту всередині карти зліва/справа
+  const barW       = cardW - innerPadX * 2 - 40; // ширина прогрес-бару
+  const barH       = 16;
+
+  // topY списку рядків
+  const listTopY = cardY + headerH + gapAfterH;
+
+  // рахуємо висоту всієї карти і всього SVG
+  const cardInnerHeight = headerH + gapAfterH + rows.length * rowGap + bottomPad;
+  const H = outerMargin * 2 + cardInnerHeight;
+
+  // ---- форматери ----
+  const nf = (x) =>
+    new Intl.NumberFormat("en-US").format(
+      Number.isFinite(Number(x)) ? Number(x) : 0
+    );
+
+  // Updated time:
+  // meta.updated > якщо передана зовні
+  // інакше беремо максимум updated_at з рядків
+  let updatedAtStr = meta.updated || "";
+  if (!updatedAtStr) {
+    let latestTs = 0;
+    for (const r of rows) {
+      if (r.updated_at) {
+        const ts = new Date(r.updated_at).getTime();
+        if (Number.isFinite(ts) && ts > latestTs) latestTs = ts;
+      }
+    }
+    updatedAtStr = latestTs
+      ? new Date(latestTs).toLocaleString("en-US", {
+          hour12: true,
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+        })
+      : "-";
+  }
 
   const title = meta.title ?? `KvK Top ${rows.length}`;
-  const sublineR = `Updated: ${meta.updated ?? "-"}`;
 
+  // будуємо частини бара:
+  // raw % може бути 4319%
+  // малюємо тільки до 200% ширини:
+  //  - фіолетовий 0..100
+  //  - бірюзовий 100..200
+  // але сам текст показує реальний raw %
+  function barPieces(pctRawNum) {
+    const raw = Number(pctRawNum) || 0;
+
+    const capped = Math.max(0, Math.min(raw, 200)); // 0..200 макс для показу ширини
+
+    const basePct = Math.min(capped, 100);                // 0..100
+    const overPct = Math.max(Math.min(capped - 100, 100), 0); // 0..100
+
+    return {
+      pctRaw: raw,                             // реальний %
+      wBase: (barW * basePct) / 100,           // ширина фіолетової частини
+      wOver: (barW * overPct) / 100,           // ширина бірюзової частини
+    };
+  }
+
+  // генеруємо рядки топу
   let lines = "";
-  rows.forEach((r, i) => {
-    const y = yStart + i * rowGap;
-    const pct = Math.max(0, Number(r.pct) || 0);
-    const pctClamped = Math.min(100, pct);
-    const barLen = (barWidth - padRight) * (pctClamped / 100);
+  rows.forEach((r, idx) => {
+    const yTop = listTopY + idx * rowGap;
 
-    const name = trimName(r.name ?? r.player_id, 26);
-    const rank = `${i + 1}.`;
-    const dkpText = `${nf(r.dkp || 0)} / ${nf(r.goal_dkp || 0)}`;
+    const { pctRaw, wBase, wOver } = barPieces(r.pct);
+
+    const playerName =
+      (r.name && r.name.trim()) ? r.name.trim() : String(r.player_id);
+
+    // текст під баром
+    const bottomLeftText  = `${nf(r.dkp || 0)} / ${nf(r.goal_dkp || 0)}`;
+    const bottomRightText = `${Math.round(pctRaw)}%`;
+
+    const rankText = `${idx + 1}.`;
+
+    const safeName = playerName
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;");
 
     lines += `
       <g>
-        <text x="${listLeft - 8}" y="${y + 15}" class="s">${rank}</text>
-        <text x="${listLeft + 30}" y="${y + 15}" class="t">${name}</text>
+        <!-- ранг -->
+        <text
+          x="${cardX + innerPadX}"
+          y="${yTop}"
+          fill="${textCol}"
+          font-family="Inter, system-ui"
+          font-size="20"
+          font-weight="600"
+        >
+          ${rankText}
+        </text>
 
-        <rect x="${barLeft}" y="${y}" width="${barWidth}" height="${hBar}" rx="${rxy}" fill="${track}"/>
-        <rect x="${barLeft}" y="${y}" width="${barLen}" height="${hBar}" rx="${rxy}" fill="${color1}"/>
+        <!-- ім'я -->
+        <text
+          x="${cardX + innerPadX + 40}"
+          y="${yTop}"
+          fill="${textCol}"
+          font-family="Inter, system-ui"
+          font-size="20"
+          font-weight="600"
+        >
+          ${safeName}
+        </text>
 
-        <text x="${barLeft}" y="${y + 35}" class="m">${dkpText}</text>
-        <text x="${barLeft + barWidth - padRight/2}" y="${y + 35}" text-anchor="end" class="m">${pct1(
-      pct
-    )}%</text>
-      </g>`;
+        <!-- фон треку -->
+        <rect
+          x="${cardX + innerPadX + 40}"
+          y="${yTop + 16}"
+          width="${barW}"
+          height="${barH}"
+          rx="4"
+          fill="${trackCol}"
+        />
+
+        <!-- базова частина прогресу 0..100% -->
+        ${wBase > 0 ? `
+        <rect
+          x="${cardX + innerPadX + 40}"
+          y="${yTop + 16}"
+          width="${wBase.toFixed(1)}"
+          height="${barH}"
+          rx="4"
+          fill="${fillPrimary}"
+        />` : ""}
+
+        <!-- оверкап частина 100..200% -->
+        ${wOver > 0 ? `
+        <rect
+          x="${cardX + innerPadX + 40}"
+          y="${yTop + 16}"
+          width="${wOver.toFixed(1)}"
+          height="${barH}"
+          rx="4"
+          fill="${fillOver}"
+          opacity="0.9"
+        />` : ""}
+
+        <!-- підпис зліва під баром -->
+        <text
+          x="${cardX + innerPadX + 40}"
+          y="${yTop + 16 + barH + 20}"
+          fill="${subCol}"
+          font-family="Inter, system-ui"
+          font-size="14"
+          font-weight="500"
+        >
+          ${bottomLeftText}
+        </text>
+
+        <!-- відсоток справа під баром -->
+        <text
+          x="${cardX + innerPadX + 40 + barW}"
+          y="${yTop + 16 + barH + 20}"
+          fill="${subCol}"
+          font-family="Inter, system-ui"
+          font-size="14"
+          font-weight="500"
+          text-anchor="end"
+        >
+          ${bottomRightText}
+        </text>
+      </g>
+    `;
   });
 
+  // збираємо весь SVG
   return `
-<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
-  <defs>
-    <style>
-      .t  { font: 700 20px system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, sans-serif; fill: ${text}; }
-      .s  { font: 600 16px system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, sans-serif; fill: ${sub}; }
-      .b  { font: 800 40px system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, sans-serif; fill: ${text}; }
-      .m  { font: 600 14px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fill: ${sub}; }
-    </style>
-  </defs>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="${W}"
+  height="${H}"
+  viewBox="0 0 ${W} ${H}"
+  style="font-family:Inter,system-ui"
+>
+  <!-- фон всього зображення -->
+  <rect width="${W}" height="${H}" fill="${panelBg}"/>
 
-  <rect width="${W}" height="${H}" fill="${panel}"/>
+  <!-- карта топу -->
   <g>
-    <rect x="20" y="20" width="${W - 40}" height="${H - 40}" rx="22" fill="${card}" stroke="${grid}" stroke-width="1"/>
+    <rect
+      x="${cardX}"
+      y="${cardY}"
+      width="${cardW}"
+      height="${cardInnerHeight}"
+      rx="16"
+      fill="${cardBg}"
+      stroke="${borderCol}"
+      stroke-width="1"
+    />
 
-    <text x="${marginX}" y="70" class="b">${title}</text>
-    <text x="${W - marginX}" y="98" class="s" text-anchor="end">${sublineR}</text>
+    <!-- title зліва -->
+    <text
+      x="${cardX + innerPadX}"
+      y="${cardY + 36}"
+      fill="${textCol}"
+      font-family="Inter, system-ui"
+      font-size="32"
+      font-weight="700"
+    >
+      ${title.replace(/&/g, "&amp;").replace(/</g, "&lt;")}
+    </text>
+
+    <!-- Updated справа -->
+    <text
+      x="${cardX + cardW - innerPadX}"
+      y="${cardY + 36}"
+      fill="${subCol}"
+      font-family="Inter, system-ui"
+      font-size="16"
+      font-weight="500"
+      text-anchor="end"
+    >
+      Updated: ${updatedAtStr}
+    </text>
 
     ${lines}
   </g>
