@@ -557,17 +557,18 @@ async function buildZoneBasedKvkBundle(playerIdInput, latest) {
 
 /* ───────────────── Рендер картки гравця (SVG -> PNG) ───────────────── */
 
-// <--- заміни свою playerCardSVG на цю
+// Рендер картки гравця в SVG
+// Всі підписи на картці англійською
 function playerCardSVG(card) {
   const { latest, goal, progress, lastZone, zoneSum } = card;
 
-  // формат чисел з комами
+  // формат числа з комами
   const nfNum = (n) =>
     (n === null || n === undefined)
       ? "0"
       : Number(n).toLocaleString("en-US");
 
-  // обмеження % 0..100
+  // clamp % до 0..100
   const clampPct = (x) => {
     const v = Number(x) || 0;
     return v < 0 ? 0 : v > 100 ? 100 : v;
@@ -583,7 +584,7 @@ function playerCardSVG(card) {
     ? clampPct((progress.dkpDone / goal.dkp) * 100)
     : 0;
 
-  // чи є завершена зона з реальними цифрами
+  // чи є хоч якісь цифри по останній зоні
   const hasLastZoneData =
     lastZone &&
     lastZone.zoneName &&
@@ -591,42 +592,50 @@ function playerCardSVG(card) {
     ((lastZone.dKillsZone || 0) > 0 ||
      (lastZone.dDeadZone  || 0) > 0);
 
-  // ---------- стиль ----------
+  /* ───── Кольори / стиль ─────
+     Повертаємося до попередньої темної гами
+     - bg: фон картки
+     - panelBg: фон блоків і барів
+     - fillCol: заливка прогресбарів
+     - textCol / subCol: основний і вторинний текст
+     - goodCol / badCol / zeroCol: колір дельти
+  */
+  const bg       = "#0d121d";
+  const panelBg  = "#2a3142";
+  const fillCol  = "#6b7bff";
+  const textCol  = "#ffffff";
+  const subCol   = "#9da5bd";
+  const goodCol  = "#6ee7a8";
+  const badCol   = "#ef5350";
+  const zeroCol  = "#7b8193";
 
-  // базові кольори
-  const bg       = "#1a1d24";     // фон картки (трохи тепліше/видиміше)
-  const panelBg  = "#2e323d";     // фон барів і боксів
-  const fillCol  = "#6b7bff";     // заливка прогрес-барів
-  const textCol  = "#ffffff";     // основний текст
-  const subCol   = "#9da5bd";     // вторинний текст
-  const goodCol  = "#6ee7a8";     // зелений "+вгору"
-  const badCol   = "#ef5350";     // червоний "-вниз"
-  const zeroCol  = "#7b8193";     // сірий "±0"
-
-  // геометрія
+  /* ───── Геометрія ─────
+     Робимо більше падінгу зверху,
+     щоб бейдж % не лип до рамки і не обрізався
+  */
   const w = 1100;
-  const h = 600;
+  const h = 620;
 
-  const padX = 24;   // лівий/правий падінг контенту
-  const padTop = 24; // верхній падінг до заголовка
+  const padX   = 24;  // лівий/правий відступ
+  const padTop = 40;  // верхній відступ (більше щоб 0% не врізалось)
 
-  // блок з метриками (Power / Kill Points / Dead / T5 / T4)
-  const metricsY = padTop + 40; // трохи нижче заголовка
-  const metricBlockGapX = 200;  // відстань між стовпцями метрик
+  // де стоїть секція з Power / Kill Points / Dead / T5 / T4
+  const metricsY = padTop + 70; // після заголовка
 
-  // блок прогрес-барів
-  const barsStartY = metricsY + 80;   // відстань від метрик до першого бара
-  const barGapY    = 90;              // вертикальний крок між барами
-  const barW       = w - padX*2;      // ширина бара = вся картка мінус падінги
+  // відстані
+  const metricBlockGapX = 200;  // простір між колонками метрик
+  const barW       = w - padX * 2;
   const barH       = 24;
+  const barGapY    = 80;        // вертикальний крок між барами
+  const barsStartY = metricsY + 100; // бари йдуть нижче метрик
 
-  // блок "LEFT TO GO"
-  const leftBoxY   = barsStartY + barGapY*3 + 40;
-  const leftBoxW   = 480;
+  // блок LEFT TO GO
+  const leftBoxY   = barsStartY + barGapY * 3 + 40;
+  const leftBoxW   = 500;
   const leftBoxH   = 70;
   const leftBoxR   = 8;
 
-  // updated_at — ЧАС СКАНУ
+  // час останнього скану (важливо: ми виносимо updated_at з latest)
   const updatedAtStr = latest.updated_at
     ? new Date(latest.updated_at).toLocaleString("en-US", {
         hour12: true,
@@ -639,38 +648,30 @@ function playerCardSVG(card) {
       })
     : "";
 
-  // дельта-текст для верхніх метрик:
-  //   якщо 0 → "±0" сірим,
-  //   >0  → "+123" зеленим,
-  //   <0  → "-123" червоним
+  /* дельти вгорі під кожною метрикою:
+     якщо 0 → "±0" сірим
+     >0     → "+123" зеленим
+     <0     → "-123" червоним
+  */
   function renderDelta(valRaw) {
     const v = Number(valRaw) || 0;
     if (v === 0) {
-      return {
-        text: "±0",
-        fill: zeroCol,
-      };
+      return { text: "±0", fill: zeroCol };
     }
     if (v > 0) {
-      return {
-        text: "+" + nfNum(v),
-        fill: goodCol,
-      };
+      return { text: "+" + nfNum(v), fill: goodCol };
     }
-    return {
-      text: "-" + nfNum(Math.abs(v)),
-      fill: badCol,
-    };
+    return { text: "-" + nfNum(Math.abs(v)), fill: badCol };
   }
 
-  // підготуємо делти для 5 метрик
+  // дані дельт від початку KvK по бойових зонах
   const dPower = renderDelta(zoneSum?.dPower || 0);
   const dKP    = renderDelta(zoneSum?.dKP    || 0);
   const dDead  = renderDelta(zoneSum?.dDead  || 0);
   const dT5    = renderDelta(zoneSum?.dT5    || 0);
   const dT4    = renderDelta(zoneSum?.dT4    || 0);
 
-  // блок з останньою зоною, якщо є дані
+  // остання зона (правий блок внизу) — показуємо тільки якщо є цифри
   const lastZoneBox = hasLastZoneData
     ? `
       <g transform="translate(${padX + leftBoxW + 24}, ${leftBoxY})">
@@ -698,29 +699,67 @@ function playerCardSVG(card) {
     `
     : "";
 
-  // ───────────────────────────────── SVG ─────────────────────────────────
+  // y-базова лінія для бейджа зверху справа.
+  // Щоб текст "0%" не був обрізаний, ми не ставимо його на сам верх,
+  // а опускаємо baseline вниз.
+  const badgeBaselineY = padTop;       // baseline великого числа
+  const badgeTagY      = padTop + 32;  // baseline тексту "WARM UP"
+
   return `
 <svg xmlns="http://www.w3.org/2000/svg"
      width="${w}" height="${h}"
      viewBox="0 0 ${w} ${h}"
      style="font-family:Inter,system-ui">
 
-  <!-- card background -->
+  <!-- фон картки -->
   <rect x="0" y="0" width="${w}" height="${h}" rx="16" fill="${bg}" />
 
   <style>
-    .title   { fill:${textCol}; font-size:24px; font-weight:600; font-family:Inter, system-ui; }
-    .sub     { fill:${subCol};  font-size:14px; font-weight:500; font-family:Inter, system-ui; }
-
-    .metricH { fill:${textCol}; font-size:18px; font-weight:600; font-family:Inter, system-ui; }
-    .metricV { fill:${textCol}; font-size:22px; font-weight:600; font-family:Inter, system-ui; }
-    .metricD { font-size:14px; font-weight:500; font-family:Inter, system-ui; }
-
-    .barLabel { fill:${textCol}; font-size:14px; font-weight:500; font-family:Inter, system-ui; }
-    .barText  { fill:${textCol}; font-size:14px; font-weight:500; font-family:Inter, system-ui; text-anchor:middle; }
+    .title   {
+      fill:${textCol};
+      font-size:24px;
+      font-weight:600;
+      font-family:Inter, system-ui;
+    }
+    .sub     {
+      fill:${subCol};
+      font-size:14px;
+      font-weight:500;
+      font-family:Inter, system-ui;
+    }
+    .metricH {
+      fill:${textCol};
+      font-size:18px;
+      font-weight:600;
+      font-family:Inter, system-ui;
+    }
+    .metricV {
+      fill:${textCol};
+      font-size:22px;
+      font-weight:600;
+      font-family:Inter, system-ui;
+    }
+    .metricD {
+      font-size:14px;
+      font-weight:500;
+      font-family:Inter, system-ui;
+    }
+    .barLabel {
+      fill:${textCol};
+      font-size:14px;
+      font-weight:500;
+      font-family:Inter, system-ui;
+    }
+    .barText  {
+      fill:${textCol};
+      font-size:14px;
+      font-weight:500;
+      font-family:Inter, system-ui;
+      text-anchor:middle;
+    }
   </style>
 
-  <!-- Header (name / id / updated_at) -->
+  <!-- Header: ім'я + player_id + Updated -->
   <g transform="translate(${padX},${padTop})">
     <text class="title">
       ${latest.name} (${latest.player_id})
@@ -731,57 +770,67 @@ function playerCardSVG(card) {
     </text>
   </g>
 
-  <!-- DKP badge (right top) -->
-  <g transform="translate(${w - padX - 10},${padTop})" text-anchor="end">
-    <text fill="${textCol}" font-size="40" font-weight="600"
-          font-family="Inter, system-ui">
+  <!-- DKP badge справа вгорі -->
+  <g transform="translate(${w - padX - 10},0)" text-anchor="end">
+    <text
+      fill="${textCol}"
+      font-size="40"
+      font-weight="600"
+      font-family="Inter, system-ui"
+      y="${badgeBaselineY}">
       ${Math.round(progress.pct)}%
     </text>
-    <text y="32" fill="${subCol}" font-size="14" font-weight="600"
-          font-family="Inter, system-ui" letter-spacing="0.08em">
+    <text
+      y="${badgeTagY}"
+      fill="${subCol}"
+      font-size="14"
+      font-weight="600"
+      font-family="Inter, system-ui"
+      letter-spacing="0.08em">
       ${progress.tag}
     </text>
   </g>
 
-  <!-- Top metrics row -->
+  <!-- Верхні метрики (Power / Kill Points / Dead / T5 / T4) -->
   <g transform="translate(${padX},${metricsY})">
+
     <!-- Power -->
     <g>
-      <text class="metricH" x="0"   y="0">Power</text>
-      <text class="metricV" x="0"   y="26">${nfNum(latest.power)}</text>
-      <text class="metricD" x="0"   y="44" fill="${dPower.fill}">${dPower.text}</text>
+      <text class="metricH" x="0"  y="0">Power</text>
+      <text class="metricV" x="0"  y="26">${nfNum(latest.power)}</text>
+      <text class="metricD" x="0"  y="44" fill="${dPower.fill}">${dPower.text}</text>
     </g>
 
     <!-- Kill Points -->
     <g transform="translate(${metricBlockGapX},0)">
-      <text class="metricH" x="0"   y="0">Kill Points</text>
-      <text class="metricV" x="0"   y="26">${nfNum(latest.kp)}</text>
-      <text class="metricD" x="0"   y="44" fill="${dKP.fill}">${dKP.text}</text>
+      <text class="metricH" x="0"  y="0">Kill Points</text>
+      <text class="metricV" x="0"  y="26">${nfNum(latest.kp)}</text>
+      <text class="metricD" x="0"  y="44" fill="${dKP.fill}">${dKP.text}</text>
     </g>
 
     <!-- Dead -->
     <g transform="translate(${metricBlockGapX*2},0)">
-      <text class="metricH" x="0"   y="0">Dead</text>
-      <text class="metricV" x="0"   y="26">${nfNum(latest.dead)}</text>
-      <text class="metricD" x="0"   y="44" fill="${dDead.fill}">${dDead.text}</text>
+      <text class="metricH" x="0"  y="0">Dead</text>
+      <text class="metricV" x="0"  y="26">${nfNum(latest.dead)}</text>
+      <text class="metricD" x="0"  y="44" fill="${dDead.fill}">${dDead.text}</text>
     </g>
 
     <!-- T5 -->
     <g transform="translate(${metricBlockGapX*3},0)">
-      <text class="metricH" x="0"   y="0">T5</text>
-      <text class="metricV" x="0"   y="26">${nfNum(latest.t5)}</text>
-      <text class="metricD" x="0"   y="44" fill="${dT5.fill}">${dT5.text}</text>
+      <text class="metricH" x="0"  y="0">T5</text>
+      <text class="metricV" x="0"  y="26">${nfNum(latest.t5)}</text>
+      <text class="metricD" x="0"  y="44" fill="${dT5.fill}">${dT5.text}</text>
     </g>
 
     <!-- T4 -->
     <g transform="translate(${metricBlockGapX*4},0)">
-      <text class="metricH" x="0"   y="0">T4</text>
-      <text class="metricV" x="0"   y="26">${nfNum(latest.t4)}</text>
-      <text class="metricD" x="0"   y="44" fill="${dT4.fill}">${dT4.text}</text>
+      <text class="metricH" x="0"  y="0">T4</text>
+      <text class="metricV" x="0"  y="26">${nfNum(latest.t4)}</text>
+      <text class="metricD" x="0"  y="44" fill="${dT4.fill}">${dT4.text}</text>
     </g>
   </g>
 
-  <!-- Progress bars block -->
+  <!-- Прогрес-бари (Kills / Dead / DKP) -->
   <g transform="translate(${padX},${barsStartY})">
 
     <!-- Kills bar -->
@@ -858,7 +907,7 @@ function playerCardSVG(card) {
 
   </g>
 
-  <!-- LEFT TO GO block -->
+  <!-- LEFT TO GO -->
   <g transform="translate(${padX},${leftBoxY})">
     <text x="0" y="0"
           font-family="Inter, system-ui"
@@ -883,7 +932,6 @@ function playerCardSVG(card) {
   </g>
 
   ${lastZoneBox}
-
 </svg>
 `;
 }
