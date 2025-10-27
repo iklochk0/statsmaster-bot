@@ -958,207 +958,257 @@ function hashTopRows(rows) {
 }
 
 function kvkTopSVG(rows, meta = {}) {
-  // ---- layout / sizing ----
+  // ---- стилі (як на картці гравця) ----
+  const panelBg     = "#0d121d";   // outer bg
+  const cardBg      = "#121722";   // card bg
+  const borderCol   = "#1e2633";   // card border
+  const textCol     = "#ffffff";   // main text
+  const subCol      = "#9da5bd";   // secondary text
+  const trackCol    = "#2a3142";   // bar track
+  const fillPrimary = "#6b7bff";   // 0..100%
+  const fillOver    = "#4deeea";   // 100..200%
+
+  // ---- геометрія ----
   const W = 1100;
+  const outerMargin = 24;      // від краю всього зображення до карти
 
-  // відстань від краю всього зображення до картки
-  const cardPadOuter = 40;
+  const cardX = outerMargin;
+  const cardY = outerMargin;
+  const cardW = W - outerMargin * 2;
 
-  // падінги всередині самої картки
-  const innerPadX = 36;
-  const innerPadY = 32;
+  const headerH    = 60;       // висота хедера всередині карти
+  const gapAfterH  = 20;       // відступ після хедера перед списком
+  const rowGap     = 90;       // висота одного рядка топа
+  const bottomPad  = 40;       // падінг знизу карти всередині
 
-  // висота хедера (заголовок + "Updated")
-  const headerH = 40;
+  // бар усередині рядка
+  const innerPadX  = 32;       // падінг контенту всередині карти зліва/справа
+  const barW       = cardW - innerPadX * 2 - 40; // ширина прогрес-бару
+  const barH       = 16;
 
-  // один "блок гравця": ім'я, підпис, бар, відсоток
-  // ми робимо ~80px висоти на кожного, щоб було повітря
-  const rowBlockH = 80;
+  // topY списку рядків
+  const listTopY = cardY + headerH + gapAfterH;
 
-  // координати самої картки
-  const cardX = cardPadOuter;
-  const cardY = cardPadOuter;
-  const cardW = W - cardPadOuter * 2;
-  const cardH = innerPadY * 2 + headerH + rows.length * rowBlockH;
+  // рахуємо висоту всієї карти і всього SVG
+  const cardInnerHeight = headerH + gapAfterH + rows.length * rowGap + bottomPad;
+  const H = outerMargin * 2 + cardInnerHeight;
 
-  // загальна висота всього SVG
-  const H = cardPadOuter * 2 + cardH;
-
-  // кольори / стиль щоб попасти в твій останній скрін
-  const canvasBg  = "#0f1218"; // фон поза карткою
-  const cardBg    = "#121722"; // фон самої картки
-  const strokeCol = "#1e2633"; // рамка картки
-  const textMain  = "#e6edf7"; // основний текст (нік, заголовок)
-  const textSub   = "#a9b4c6"; // сірий дрібніший текст
-  const barTrack  = "#2b3342"; // фон бара
-  const barFill   = "#7ef5f5"; // бірюзова смужка прогресу
-
-  // геометрія бара
-  const barH = 20;
-  const barR = 6;
-
-  // де починається контент усередині картки
-  const contentX = cardX + innerPadX;
-  const contentY = cardY + innerPadY;
-
-  // позиції заголовка і "Updated"
-  const titleX = contentX;
-  const titleY = contentY + 32; // baseline "KvK Top N"
-  const updatedX = cardX + cardW - innerPadX;
-  const updatedY = titleY; // на одній лінії
-
-  // де починається список гравців
-  const listStartY = contentY + headerH; // трохи нижче заголовка
-
-  // дрібні хелпери
+  // ---- форматери ----
   const nf = (x) =>
     new Intl.NumberFormat("en-US").format(
       Number.isFinite(Number(x)) ? Number(x) : 0
     );
 
-  const pct1 = (x) => {
-    const n = Number(x);
-    return Number.isFinite(n) ? Math.round(n * 10) / 10 : 0;
-  };
+  // Updated time:
+  // meta.updated > якщо передана зовні
+  // інакше беремо максимум updated_at з рядків
+  let updatedAtStr = meta.updated || "";
+  if (!updatedAtStr) {
+    let latestTs = 0;
+    for (const r of rows) {
+      if (r.updated_at) {
+        const ts = new Date(r.updated_at).getTime();
+        if (Number.isFinite(ts) && ts > latestTs) latestTs = ts;
+      }
+    }
+    updatedAtStr = latestTs
+      ? new Date(latestTs).toLocaleString("en-US", {
+          hour12: true,
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+        })
+      : "-";
+  }
 
-  const trimName = (s = "", max = 32) => {
-    s = String(s || "");
-    return s.length > max ? s.slice(0, max - 1) + "…" : s;
-  };
+  const title = meta.title ?? `KvK Top ${rows.length}`;
 
-  // текст хедера
-  const titleText   = meta.title ?? `KvK Top ${rows.length}`;
-  const updatedText = meta.updated
-    ? `Updated: ${meta.updated}`
-    : "Updated: -";
+  // будуємо частини бара:
+  // raw % може бути 4319%
+  // малюємо тільки до 200% ширини:
+  //  - фіолетовий 0..100
+  //  - бірюзовий 100..200
+  // але сам текст показує реальний raw %
+  function barPieces(pctRawNum) {
+    const raw = Number(pctRawNum) || 0;
 
-  // будуємо рядки
+    const capped = Math.max(0, Math.min(raw, 200)); // 0..200 макс для показу ширини
+
+    const basePct = Math.min(capped, 100);                // 0..100
+    const overPct = Math.max(Math.min(capped - 100, 100), 0); // 0..100
+
+    return {
+      pctRaw: raw,                             // реальний %
+      wBase: (barW * basePct) / 100,           // ширина фіолетової частини
+      wOver: (barW * overPct) / 100,           // ширина бірюзової частини
+    };
+  }
+
+  // генеруємо рядки топу
   let lines = "";
+  rows.forEach((r, idx) => {
+    const yTop = listTopY + idx * rowGap;
 
-  rows.forEach((r, i) => {
-    // верхня Y-координата блоку гравця
-    const rowTop = listStartY + i * rowBlockH;
+    const { pctRaw, wBase, wOver } = barPieces(r.pct);
 
-    // ранг і ім'я відображаємо в один рядок
-    const rankStr = `${i + 1}.`;
-    const nameStr = trimName(r.name ?? r.player_id, 32);
+    const playerName =
+      (r.name && r.name.trim()) ? r.name.trim() : String(r.player_id);
 
-    // підпис під ніком типу "1,014,955,000 / 23,500,000"
-    const pairText = `${nf(r.dkp || 0)} / ${nf(r.goal_dkp || 0)}`;
+    // текст під баром
+    const bottomLeftText  = `${nf(r.dkp || 0)} / ${nf(r.goal_dkp || 0)}`;
+    const bottomRightText = `${Math.round(pctRaw)}%`;
 
-    // прогрес у %, може бути 0%, може бути 4319%
-    const pctVal = Math.max(0, Number(r.pct) || 0);
-    const pctLabel = `${pct1(pctVal)}%`;
+    const rankText = `${idx + 1}.`;
 
-    // ширина бара: займає всю ширину картки мінус лівий паддінг і правий паддінг
-    const barLeft = contentX + 20; // трішки вправо після рангу
-    const barMaxW = cardX + cardW - innerPadX - barLeft; // скільки місця до правого краю
-    // ми обрізаємо заповнення на 100%, але сам текст % показує реальне значення
-    const pctClamped = Math.min(pctVal, 100);
-    const barFillW = barMaxW * (pctClamped / 100);
-
-    // базові Y для текстів у рядку
-    const nameBaselineY = rowTop + 16;      // "1. Nick"
-    const pairBaselineY = rowTop + 32;      // "dkp / goal"
-    const barY          = rowTop + 40;      // сам бар
-    const pctBaselineY  = barY + barH / 2 + 4; // % справа, по центру бару
+    const safeName = playerName
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;");
 
     lines += `
       <g>
-        <!-- Ранг -->
-        <text x="${contentX}" y="${nameBaselineY}"
-              font-family="system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,sans-serif"
-              font-size="18"
-              font-weight="600"
-              fill="${textMain}">
-          ${rankStr}
+        <!-- ранг -->
+        <text
+          x="${cardX + innerPadX}"
+          y="${yTop}"
+          fill="${textCol}"
+          font-family="Inter, system-ui"
+          font-size="20"
+          font-weight="600"
+        >
+          ${rankText}
         </text>
 
-        <!-- Нікнейм -->
-        <text x="${contentX + 30}" y="${nameBaselineY}"
-              font-family="system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,sans-serif"
-              font-size="20"
-              font-weight="600"
-              fill="${textMain}">
-          ${nameStr}
+        <!-- ім'я -->
+        <text
+          x="${cardX + innerPadX + 40}"
+          y="${yTop}"
+          fill="${textCol}"
+          font-family="Inter, system-ui"
+          font-size="20"
+          font-weight="600"
+        >
+          ${safeName}
         </text>
 
-        <!-- dkp / goal_dkp -->
-        <text x="${contentX + 30}" y="${pairBaselineY}"
-              font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"
-              font-size="14"
-              font-weight="500"
-              fill="${textSub}">
-          ${pairText}
+        <!-- фон треку -->
+        <rect
+          x="${cardX + innerPadX + 40}"
+          y="${yTop + 16}"
+          width="${barW}"
+          height="${barH}"
+          rx="4"
+          fill="${trackCol}"
+        />
+
+        <!-- базова частина прогресу 0..100% -->
+        ${wBase > 0 ? `
+        <rect
+          x="${cardX + innerPadX + 40}"
+          y="${yTop + 16}"
+          width="${wBase.toFixed(1)}"
+          height="${barH}"
+          rx="4"
+          fill="${fillPrimary}"
+        />` : ""}
+
+        <!-- оверкап частина 100..200% -->
+        ${wOver > 0 ? `
+        <rect
+          x="${cardX + innerPadX + 40}"
+          y="${yTop + 16}"
+          width="${wOver.toFixed(1)}"
+          height="${barH}"
+          rx="4"
+          fill="${fillOver}"
+          opacity="0.9"
+        />` : ""}
+
+        <!-- підпис зліва під баром -->
+        <text
+          x="${cardX + innerPadX + 40}"
+          y="${yTop + 16 + barH + 20}"
+          fill="${subCol}"
+          font-family="Inter, system-ui"
+          font-size="14"
+          font-weight="500"
+        >
+          ${bottomLeftText}
         </text>
 
-        <!-- трек бара -->
-        <rect x="${barLeft}" y="${barY}"
-              width="${barMaxW}" height="${barH}"
-              rx="${barR}" ry="${barR}"
-              fill="${barTrack}"/>
-
-        <!-- заповнена частина бара -->
-        <rect x="${barLeft}" y="${barY}"
-              width="${barFillW}" height="${barH}"
-              rx="${barR}" ry="${barR}"
-              fill="${barFill}"/>
-
-        <!-- відсоток справа на рівні бара -->
-        <text x="${barLeft + barMaxW}" y="${pctBaselineY}"
-              text-anchor="end"
-              font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"
-              font-size="14"
-              font-weight="500"
-              fill="${textSub}">
-          ${pctLabel}
+        <!-- відсоток справа під баром -->
+        <text
+          x="${cardX + innerPadX + 40 + barW}"
+          y="${yTop + 16 + barH + 20}"
+          fill="${subCol}"
+          font-family="Inter, system-ui"
+          font-size="14"
+          font-weight="500"
+          text-anchor="end"
+        >
+          ${bottomRightText}
         </text>
       </g>
     `;
   });
 
-  // готовий SVG
+  // збираємо весь SVG
   return `
-<svg xmlns="http://www.w3.org/2000/svg"
-     width="${W}"
-     height="${H}"
-     viewBox="0 0 ${W} ${H}">
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="${W}"
+  height="${H}"
+  viewBox="0 0 ${W} ${H}"
+  style="font-family:Inter,system-ui"
+>
+  <!-- фон всього зображення -->
+  <rect width="${W}" height="${H}" fill="${panelBg}"/>
 
-  <!-- фон поза карткою -->
-  <rect width="${W}" height="${H}" fill="${canvasBg}"/>
-
-  <!-- сама картка -->
+  <!-- карта топу -->
   <g>
-    <rect x="${cardX}" y="${cardY}"
-          width="${cardW}" height="${cardH}"
-          rx="22"
-          fill="${cardBg}"
-          stroke="${strokeCol}"
-          stroke-width="1"/>
+    <rect
+      x="${cardX}"
+      y="${cardY}"
+      width="${cardW}"
+      height="${cardInnerHeight}"
+      rx="16"
+      fill="${cardBg}"
+      stroke="${borderCol}"
+      stroke-width="1"
+    />
 
-    <!-- Заголовок -->
-    <text x="${titleX}" y="${titleY}"
-          font-family="system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,sans-serif"
-          font-size="36"
-          font-weight="700"
-          fill="${textMain}">
-      ${titleText}
+    <!-- title зліва -->
+    <text
+      x="${cardX + innerPadX}"
+      y="${cardY + 36}"
+      fill="${textCol}"
+      font-family="Inter, system-ui"
+      font-size="32"
+      font-weight="700"
+    >
+      ${title.replace(/&/g, "&amp;").replace(/</g, "&lt;")}
     </text>
 
     <!-- Updated справа -->
-    <text x="${updatedX}" y="${titleY}"
-          text-anchor="end"
-          font-family="system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,sans-serif"
-          font-size="16"
-          font-weight="500"
-          fill="${textSub}">
-      ${updatedText}
+    <text
+      x="${cardX + cardW - innerPadX}"
+      y="${cardY + 36}"
+      fill="${subCol}"
+      font-family="Inter, system-ui"
+      font-size="16"
+      font-weight="500"
+      text-anchor="end"
+    >
+      Updated: ${updatedAtStr}
     </text>
 
     ${lines}
   </g>
 </svg>`;
 }
+
 
 async function renderKvkTopPNG(rows, meta) {
   const svg = kvkTopSVG(rows, meta);
