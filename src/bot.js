@@ -25,7 +25,7 @@ import {
 import { Pool } from "pg";
 import sharp from "sharp";
 import { createHash } from "node:crypto";
-
+import http from "http";
 import {
   initSchema,
   kvkStart,
@@ -37,6 +37,18 @@ import {
   getZone,
   fetchStatsByRun, // Map(player_id -> row for that run_id)
 } from "./db.pg.js";
+
+// простий healthcheck для платформи
+const PORT = process.env.PORT || 3000;
+http
+  .createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("ok\n");
+  })
+  .listen(PORT, () => {
+    console.log("healthcheck server on :" + PORT);
+  });
+
 
 /* ───────────── env / config ───────────── */
 
