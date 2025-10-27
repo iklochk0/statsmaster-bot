@@ -1,24 +1,26 @@
 // src/index.js
-// CityHall25 scanner бот
-// - відкриття профілів по списку
-// - OCR полів (id, name, power, kp, t1..t5, dead, etc.)
-// - вставка в Postgres через db.pg.js
-// - KvK автогоал (ТІЛЬКИ в baseline режимі `npm run scan`)
-// - random fake swipe у "смертях"
-// - подвійні тапи (copyName + закриття смертей) з довшою рандомною паузою (0.5-1.1s)
-// - зона start/finish (zoneName як текст): зберігаємо run_id як start_run_id / end_run_id
-// - додаткова settle пауза перед OCR щоб екран встиг прогрузитись
+// CityHall25 scanner bot
 //
-// CLI режими:
-//   baseline KvK snapshot / створює цілі:
-//     npm run scan
+// Що робить:
+// 1. Заходить у рейтинг → City Hall list
+// 2. Відкриває профілі по рядках, читає OCR полів (id/name/power/kp/t1..t5/dead)
+// 3. Зберігає все в Postgres через db.pg.js (saveScan)
+// 4. Якщо це baseline (звичайний запуск без zone), то:
+//    - kvkEnsureGoal() автосоздає KvK goals для гравця
+// 5. Підтримка "zone start/finish": npm run scan zone "Kingsland push" start|finish
+//    - просто фіксує run_id зони
 //
-//   бій (зона):
-//     npm run scan zone "4" start
-//     npm run scan zone "4" finish
+// Тех:
+// - робимо паузи, подвійні тапи, фейкові свайпи по "dead"
+// - дуже акуратно тиснемо всередині safe-зони екрана
+// - бекопимо всі скани в out/run-<run_id>.json і out/players.json
 //
-// baseline робить kvkEnsureGoal() для кожного гравця;
-// zone start / zone finish НЕ створюють goals, просто фіксують run_id зони.
+// Важливі поля, які ми з OCR зобовʼязані дістати:
+//   kp  = Kill Points (очки за кілли в грі) -> latest.kp / stats.kp
+//   t1..t5 = kills по тірах -> latest.t*, stats.t*
+//   dead = втрати солдат
+//
+// goal у KvK сьогодні рахується по t4+t5 (це "kills" для DKP), а kp зберігається просто як довідкова метрика
 
 import "dotenv/config";
 import fs from "fs/promises";
@@ -35,8 +37,7 @@ import { navigate, sleep } from "./emu.js";
 import {
   initSchema,
   beginRun,
-  upsertPlayer,
-  insertStats,
+  saveScan,
   kvkEnsureGoal,
   kvkActiveId,
   closeDb,
@@ -45,121 +46,143 @@ import {
   getZone,
 } from "./db.pg.js";
 
-/* ===================== Paths & Config ===================== */
+/* ──────────────────────── Paths / config ──────────────────────── */
+
 const __filename = fileURLToPath(import.meta.url);
-const __dirname  = path.dirname(__filename);
-const ROOT_DIR   = path.resolve(__dirname, "..");
-const OUT_DIR    = path.join(ROOT_DIR, "out");
+const __dirname = path.dirname(__filename);
+const ROOT_DIR = path.resolve(__dirname, "..");
+const OUT_DIR = path.join(ROOT_DIR, "out");
 await fs.mkdir(OUT_DIR, { recursive: true }).catch(() => {});
 
-const UI   = JSON.parse(await fs.readFile(new URL("./ui.json",      import.meta.url), "utf-8"));
-const CFG  = JSON.parse(await fs.readFile(new URL("./regions.json", import.meta.url), "utf-8"));
+const UI = JSON.parse(
+  await fs.readFile(new URL("./ui.json", import.meta.url), "utf-8")
+);
+const CFG = JSON.parse(
+  await fs.readFile(new URL("./regions.json", import.meta.url), "utf-8")
+);
+
 const FLOW = UI.flow;
 const LIST = UI.cityHallList;
 
-const SCREEN_PATH = process.env.SCREEN_PATH || path.join(ROOT_DIR, "screenshots", "screen.png");
-const ADB         = process.env.ADB_BIN || "adb";
-const SERIAL      = process.env.ADB_SERIAL || "";  // e.g. "127.0.0.1:5555"
+// adb / emulator setup
+const SCREEN_PATH =
+  process.env.SCREEN_PATH ||
+  path.join(ROOT_DIR, "screenshots", "screen.png");
+const ADB = process.env.ADB_BIN || "adb";
+const SERIAL = process.env.ADB_SERIAL || ""; // "127.0.0.1:5555"
 const USE_HOST_CLIPBOARD = process.env.USE_HOST_CLIPBOARD !== "false"; // default true
 
-const SAFE = UI.screen?.safe ?? { left: 0, top: 0, width: 1280, height: 720 };
-const ANCHOR_CITYHALL = UI.anchors?.cityHall ?? { left: 520, top: 110, width: 260, height: 60 };
+// safe tap area on screen
+const SAFE = UI.screen?.safe ?? {
+  left: 0,
+  top: 0,
+  width: 1280,
+  height: 720,
+};
 
-/* ===================== Timings ===================== */
-/**
- * ми робимо бота повільнішим і "людським":
- *  - settle ~1s
- *  - паузи між натисками довші
- *  - паузи між профілями 1-2с
- */
+// OCR anchor щоб переконатись що ми реально в списку City Hall
+const ANCHOR_CITYHALL =
+  UI.anchors?.cityHall ?? { left: 520, top: 110, width: 260, height: 60 };
+
+/* ──────────────────────── Timings / humanization ──────────────────────── */
+
+// розтягнуті паузи щоб виглядати "людсько"
 const T_SETTLE = Number(FLOW.settleMs ?? 1000);
 const T_JITTER = () => 150 + Math.floor(Math.random() * 250);
 
 const T_OCR_NAME_GUESS = 220;
-const T_CLIP_STEP  = 180;
-const T_CLIP_ADB   = 2500;
-const T_CLIP_HOST  = 3000;
-const T_LONGPRESS  = 360;
+const T_CLIP_STEP = 180;
+const T_CLIP_ADB = 2500;
+const T_CLIP_HOST = 3000;
+const T_LONGPRESS = 360;
 
-// додаткова пауза перед OCR профілю
+// щоб екран профілю точно встиг намалюватися перед OCR
 const PRE_SCAN_SETTLE_MS = 800;
 
-// скільки чекати між профілями
+// пауза між профілями
 const SCAN_PAUSE_MIN_MS = Number(process.env.SCAN_PAUSE_MIN_MS || 1000);
 const SCAN_PAUSE_MAX_MS = Number(process.env.SCAN_PAUSE_MAX_MS || 2000);
 
-// якщо хочеш супер-стабільно тиснути один піксель — лиш RAND_PX=0
+// якщо RAND_PX > 0, ми додаємо +-кілька пікселів до кожного тапа
 const RAND_PX = Number(process.env.RAND_PX || 0);
 
-// 0-based: 4 => це 5-та позиція ("база")
+// базовий (5-й у списку) індекс для фарму в лупі
 const BASE_ROW_IDX = Number(process.env.BASE_ROW_IDX ?? 4);
 
-/* ====== Настройки IDLE-пауз ====== */
-const IDLE_EVERY_MIN = Number(process.env.IDLE_EVERY_MIN || 3);     // кожні N хвилин
-const IDLE_MIN_MS    = Number(process.env.IDLE_MIN_MS || 5000);     // мінімум "стояти"
-const IDLE_MAX_MS    = Number(process.env.IDLE_MAX_MS || 20000);    // максимум "стояти"
+// idle-перерви (бот "нічого не робить" кілька секунд час від часу)
+const IDLE_EVERY_MIN = Number(process.env.IDLE_EVERY_MIN || 3);
+const IDLE_MIN_MS = Number(process.env.IDLE_MIN_MS || 5000);
+const IDLE_MAX_MS = Number(process.env.IDLE_MAX_MS || 20000);
 
-/* ====== Настройки фейкових свайпів на "смертях" ====== */
-const FAKE_SWIPE_DY    = Number(process.env.FAKE_SWIPE_DY || 140);
+// тролимо гру "скролом смертей"
+const FAKE_SWIPE_DY = Number(process.env.FAKE_SWIPE_DY || 140);
 const FAKE_SWIPE_COUNT = Number(process.env.FAKE_SWIPE_COUNT || 1);
-const FAKE_SWIPE_DUR   = Number(process.env.FAKE_SWIPE_DUR || 380);
+const FAKE_SWIPE_DUR = Number(process.env.FAKE_SWIPE_DUR || 380);
+const FAKE_SWIPE_PROB = Number(process.env.FAKE_SWIPE_PROB || 0.3);
 
-// шанс зробити фейковий свайп на екрані де "dead"
-const FAKE_SWIPE_PROB  = Number(process.env.FAKE_SWIPE_PROB || 0.3);
+/* ──────────────────────── CLI режим ──────────────────────── */
 
-// рандомні хелпери
-const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
-const randMs  = (min, max) => randInt(min, max);
-
-const humanPause = async () => { await sleep(randInt(SCAN_PAUSE_MIN_MS, SCAN_PAUSE_MAX_MS)); };
-const jitterPx  = (v) => v + randInt(-RAND_PX, RAND_PX);
-const jitterDur = (ms=120) => Math.max(60, ms + randInt(-30, 30));
-
-/* ===================== Логування (консоль + файл) ===================== */
-const ACTION_LOG = [];
-function logAction(type, detail) {
-  const entry = { at: new Date().toISOString(), type, ...detail };
-  ACTION_LOG.push(entry);
-  const brief = JSON.stringify(detail);
-  console.log(`[ACTION] ${type} ${brief.length > 200 ? brief.slice(0,200)+"…" : brief}`);
-}
-async function sleepLog(ms, reason = "") {
-  logAction("sleep", { ms, reason });
-  await sleep(ms);
-}
-
-/* ===================== CLI args ===================== */
 function arg(name, def) {
-  const a = process.argv.find(s => s.startsWith(`--${name}=`));
+  const a = process.argv.find((s) => s.startsWith(`--${name}=`));
   return a ? a.split("=", 2)[1] : def;
 }
+
+// скількох гравців намагатись пройти
 const COUNT = Number(arg("count", "40"));
 
-// позиційні аргументи для зон:
-//
-// baseline KvK snapshot:
-//   node src/index.js
-//
-// zone snapshot:
-//   node src/index.js zone "Kingsland push" start
-//   node src/index.js zone "Kingsland push" finish
-//
+// positional args для зон:
+//   npm run scan
+//   npm run scan zone "Kingsland push" start
+//   npm run scan zone "Kingsland push" finish
 const POSITIONAL = process.argv.slice(2);
-let ZONE_MODE = null; // { name: <string>, mode: "start"|"finish" }
+
+let ZONE_MODE = null; // { name: string, mode: "start"|"finish" } або null
 if (POSITIONAL[0] === "zone" && POSITIONAL.length >= 3) {
-  const zName = POSITIONAL[1];
-  const m = String(POSITIONAL[2] || "").toLowerCase();
-  if (zName && (m === "start" || m === "finish")) {
-    ZONE_MODE = { name: zName, mode: m };
-    console.log(`Zone mode: "${zName}" → ${m}`);
+  const zoneName = POSITIONAL[1];
+  const zMode = String(POSITIONAL[2] || "").toLowerCase();
+  if (zoneName && (zMode === "start" || zMode === "finish")) {
+    ZONE_MODE = { name: zoneName, mode: zMode };
+    console.log(`Zone mode: "${zoneName}" → ${zMode}`);
   } else {
-    console.warn(`Zone args ignored (expected: zone "<name>" start|finish)`);
+    console.warn(
+      `Zone args ignored (expected: zone "<name>" start|finish)`
+    );
   }
 }
 // baseline режим = немає ZONE_MODE
 const BASELINE_MODE = !ZONE_MODE;
 
-/* ===================== ADB & geometry ===================== */
+/* ──────────────────────── Helpers: randoms / sleep / logging ──────────────────────── */
+
+const randInt = (min, max) =>
+  Math.floor(Math.random() * (max - min + 1)) + min;
+const randMs = (min, max) => randInt(min, max);
+
+const humanPause = async () => {
+  await sleep(randInt(SCAN_PAUSE_MIN_MS, SCAN_PAUSE_MAX_MS));
+};
+const jitterPx = (v) => v + randInt(-RAND_PX, RAND_PX);
+const jitterDur = (ms = 120) => Math.max(60, ms + randInt(-30, 30));
+
+const ACTION_LOG = [];
+function logAction(type, detail = {}) {
+  const entry = { at: new Date().toISOString(), type, ...detail };
+  ACTION_LOG.push(entry);
+  const brief = JSON.stringify(detail);
+  console.log(
+    `[ACTION] ${type} ${
+      brief.length > 200 ? brief.slice(0, 200) + "…" : brief
+    }`
+  );
+}
+
+async function sleepLog(ms, reason = "") {
+  logAction("sleep", { ms, reason });
+  await sleep(ms);
+}
+
+/* ──────────────────────── ADB helpers ──────────────────────── */
+
 function adbArgs(args) {
   const a = [];
   if (SERIAL) a.push("-s", SERIAL);
@@ -167,36 +190,55 @@ function adbArgs(args) {
   return a;
 }
 
-// Точний тап (через swipe x,y -> x,y)
+// клік через swipe x,y -> x,y
 async function adbTapExact(x, y, durMs = 120, meta = {}) {
   const xx = Math.round(x);
   const yy = Math.round(y);
   const dd = Math.max(60, Math.round(durMs));
+
   logAction("tap", { x: xx, y: yy, durMs: dd, ...meta });
+
   await execa(
     ADB,
     adbArgs([
-      "shell","input","swipe",
-      String(xx), String(yy),
-      String(xx), String(yy),
-      String(dd)
+      "shell",
+      "input",
+      "swipe",
+      String(xx),
+      String(yy),
+      String(xx),
+      String(yy),
+      String(dd),
     ]),
     { encoding: "buffer" }
   );
 }
 
 async function adbSwipe(x1, y1, x2, y2, durMs = 300, meta = {}) {
-  const xx1 = Math.round(x1), yy1 = Math.round(y1);
-  const xx2 = Math.round(x2), yy2 = Math.round(y2);
-  const dd  = Math.max(80, Math.round(durMs));
-  logAction("swipe", { from: { x: xx1, y: yy1 }, to: { x: xx2, y: yy2 }, durMs: dd, ...meta });
+  const xx1 = Math.round(x1),
+    yy1 = Math.round(y1);
+  const xx2 = Math.round(x2),
+    yy2 = Math.round(y2);
+  const dd = Math.max(80, Math.round(durMs));
+
+  logAction("swipe", {
+    from: { x: xx1, y: yy1 },
+    to: { x: xx2, y: yy2 },
+    durMs: dd,
+    ...meta,
+  });
+
   await execa(
     ADB,
     adbArgs([
-      "shell","input","swipe",
-      String(xx1), String(yy1),
-      String(xx2), String(yy2),
-      String(dd)
+      "shell",
+      "input",
+      "swipe",
+      String(xx1),
+      String(yy1),
+      String(xx2),
+      String(yy2),
+      String(dd),
     ]),
     { encoding: "buffer" }
   );
@@ -213,85 +255,93 @@ async function sendKeyevent(code) {
   } catch {}
 }
 
+/* ──────────────────────── geometry ──────────────────────── */
+
 const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+
 function clampToSafe(pt) {
   const x = clamp(pt.x, SAFE.left, SAFE.left + SAFE.width - 1);
-  const y = clamp(pt.y, SAFE.top,  SAFE.top  + SAFE.height - 1);
+  const y = clamp(pt.y, SAFE.top, SAFE.top + SAFE.height - 1);
   return { ...pt, x, y };
 }
 
 function hasRect(a) {
-  return a
-    && typeof a === "object"
-    && Number.isFinite(a.left)
-    && Number.isFinite(a.top)
-    && Number.isFinite(a.width)
-    && Number.isFinite(a.height);
+  return (
+    a &&
+    typeof a === "object" &&
+    Number.isFinite(a.left) &&
+    Number.isFinite(a.top) &&
+    Number.isFinite(a.width) &&
+    Number.isFinite(a.height)
+  );
 }
 
 function pickPointInRect(rect) {
-  // випадкова точка всередині rect у межах SAFE
-  const x = rect.left + randInt(0, Math.max(0, rect.width  - 1));
-  const y = rect.top  + randInt(0, Math.max(0, rect.height - 1));
+  // випадкова точка всередині rect, затиснута в SAFE
+  const x = rect.left + randInt(0, Math.max(0, rect.width - 1));
+  const y = rect.top + randInt(0, Math.max(0, rect.height - 1));
   return clampToSafe({ x, y });
 }
 
-/* ===================== Fake swipe в блоці dead ===================== */
+/* ──────────────────────── fake swipe у "dead" ──────────────────────── */
+
 async function fakeSwipeInDead() {
   for (let i = 0; i < FAKE_SWIPE_COUNT; i++) {
     const x0 = SAFE.left + SAFE.width / 2 + randInt(-20, 20);
     const y0 = SAFE.top + SAFE.height / 2 + randInt(40, 80);
+
     await adbSwipe(
-      x0, y0,
-      x0, y0 - FAKE_SWIPE_DY,
+      x0,
+      y0,
+      x0,
+      y0 - FAKE_SWIPE_DY,
       FAKE_SWIPE_DUR + randInt(-60, 60),
       { i }
     );
+
     await sleepLog(300 + randInt(0, 250), "after fake swipe");
   }
 }
 
-/* ===================== navigateHuman ===================== */
+/* ──────────────────────── navigationHuman() ──────────────────────── */
 /**
- * Підтримує:
+ * Підтримує дії:
  *  - {type:"tap", x, y, durMs}
  *  - {type:"tap", rect:{left,top,width,height}, durMs}
  *  - {type:"tapRect", left, top, width, height, durMs}
  *  - масив таких дій
- * Використовує adbTapExact із невеликим джитером,
- * тому виглядає більш "людсько".
+ * Якщо нічого не підійшло — викликає navigate(...) зі старого ui.json.
  */
 async function navigateHuman(actionOrArray) {
+  const tapFromRect = async (rect, durMs) => {
+    const p = pickPointInRect(rect);
+    logAction("tapRect", { rect, picked: p });
+    await adbTapExact(p.x, p.y, durMs ?? 120);
+  };
+
   const doOne = async (a) => {
     if (!a || typeof a !== "object") return;
 
-    // tap з вкладеним rect
+    // варіант: {type:"tap", rect:{...}}
     if (a.type === "tap" && a.rect && hasRect(a.rect)) {
-      const p = pickPointInRect(a.rect);
-      logAction("tapRect", { rect: a.rect, picked: p });
-      await adbTapExact(p.x, p.y, a.durMs ?? 120);
-      return;
+      return tapFromRect(a.rect, a.durMs);
     }
 
-    // tapRect як є
+    // варіант: {type:"tapRect", left, top, width, height}
     if (a.type === "tapRect" && hasRect(a)) {
-      const p = pickPointInRect(a);
-      logAction("tapRect", { rect: a, picked: p });
-      await adbTapExact(p.x, p.y, a.durMs ?? 120);
-      return;
+      return tapFromRect(a, a.durMs);
     }
 
-    // простий tap x/y
+    // варіант: {type:"tap", x, y}
     if (a.type === "tap" && Number.isFinite(a.x) && Number.isFinite(a.y)) {
       const base = clampToSafe({ x: a.x, y: a.y });
       const j = RAND_PX
         ? clampToSafe({ x: jitterPx(base.x), y: jitterPx(base.y) })
         : base;
-      await adbTapExact(j.x, j.y, jitterDur(a.durMs ?? 120));
-      return;
+      return adbTapExact(j.x, j.y, jitterDur(a.durMs ?? 120));
     }
 
-    // fallback: викликаємо navigate(...) зі старого ui.json
+    // fallback: raw navigate() з ui.json (послідовність свайпів і т.д.)
     logAction("navigate-pass", { raw: a });
     await navigate(a);
   };
@@ -305,8 +355,10 @@ async function navigateHuman(actionOrArray) {
   }
 }
 
-/* ===================== OCR utils ===================== */
+/* ──────────────────────── OCR utils ──────────────────────── */
+
 const DIGITS = "0123456789";
+
 async function ocrField(key, buf) {
   const wl = key === "name" ? null : DIGITS;
   const txt = (await ocrBuffer(buf, wl)).trim();
@@ -314,34 +366,43 @@ async function ocrField(key, buf) {
   return txt;
 }
 
-/* ===================== Geometry (CH level col) ===================== */
+/* ──────────────────────── CH row geometry → level OCR ──────────────────────── */
+
 function rowRefY(i) {
   const r = LIST.rows[i];
   if (!r) throw new Error(`ui.cityHallList.rows[${i}] missing`);
-  if (r.rect && hasRect(r.rect)) return r.rect.top + r.rect.height / 2;
+
+  if (r.rect && hasRect(r.rect)) {
+    return r.rect.top + r.rect.height / 2;
+  }
   if (Number.isFinite(r.y)) return r.y;
+
   throw new Error(`rows[${i}] must have either rect or y`);
 }
 
 function levelRectForRow(i) {
   const col = LIST.levelCol;
   if (!col?.left || !col?.width || !col?.height) {
-    throw new Error("ui.json cityHallList.levelCol requires left,width,height");
+    throw new Error(
+      "ui.json cityHallList.levelCol requires left,width,height"
+    );
   }
 
   const { left, width, height } = col;
   const safeTop = SAFE.top;
   const safeBottom = SAFE.top + SAFE.height;
 
+  // режим top0 + dy
   if (Number.isFinite(col.top0)) {
-    const dy  = rowRefY(i) - rowRefY(0);
+    const dy = rowRefY(i) - rowRefY(0);
     const top = clamp(Math.round(col.top0 + dy), safeTop, safeBottom - height);
     return { left, top, width, height };
   }
 
+  // режим offset
   const off = Array.isArray(col.topOffset)
-    ? (col.topOffset[i] ?? 0)
-    : (col.topOffset ?? 0);
+    ? col.topOffset[i] ?? 0
+    : col.topOffset ?? 0;
 
   const centerY = rowRefY(i);
   const top = clamp(
@@ -352,8 +413,10 @@ function levelRectForRow(i) {
   return { left, top, width, height };
 }
 
+// читаємо рівень сітіхолу у рядку (щоб скіпати не-25)
 async function readLevelAtRow(i) {
   await sleepLog(50 + randInt(0, 90), "before OCR row");
+
   const rect = levelRectForRow(i);
 
   await captureScreen(SCREEN_PATH);
@@ -361,13 +424,16 @@ async function readLevelAtRow(i) {
   const outDir = path.join(ROOT_DIR, "screenshots", "ch_levels");
   const piece = await cropRegions(SCREEN_PATH, { [key]: rect }, outDir);
   const buf = piece[key];
+
   const raw = buf ? (await ocrBuffer(buf, DIGITS)).trim() : "";
   const n = Number((raw || "").replace(/\D/g, ""));
+
   logAction("ocrRow", { row: i, rect, raw, parsed: n });
   return Number.isFinite(n) ? n : NaN;
 }
 
-/* ===================== Profile screen detection ===================== */
+/* ──────────────────────── screen detection helpers ──────────────────────── */
+
 function regionNameCenter() {
   const r = CFG?.pages?.[0]?.rois?.name;
   if (!r) return null;
@@ -380,9 +446,11 @@ function actionCopyFromRegions() {
   return CFG?.pages?.[0]?.actions?.copyName || null;
 }
 
+// приблизна евристика: чи ми в профілі гравця
 async function isProfileScreen() {
   await captureScreen(SCREEN_PATH);
   const top = CFG.pages[0];
+
   const rois = await cropRegions(
     SCREEN_PATH,
     top.rois,
@@ -393,65 +461,85 @@ async function isProfileScreen() {
   const idDigits = (idRaw || "").replace(/\D/g, "");
   if (idDigits.length >= 5) return true;
 
-  const powRaw    = rois.power ? (await ocrBuffer(rois.power, DIGITS)).trim() : "";
-  // kills OR kp
-  const killsRaw  = rois.kills
-    ? (await ocrBuffer(rois.kills, DIGITS)).trim()
-    : (rois.kp
-        ? (await ocrBuffer(rois.kp, DIGITS)).trim()
-        : "");
+  const powRaw = rois.power
+    ? (await ocrBuffer(rois.power, DIGITS)).trim()
+    : "";
 
-  const pow   = Number((powRaw   || "").replace(/\D/g, ""));
+  // назва в regions.json може бути kills або kp — пробуємо обидва
+  const killsRaw = rois.kills
+    ? (await ocrBuffer(rois.kills, DIGITS)).trim()
+    : rois.kp
+    ? (await ocrBuffer(rois.kp, DIGITS)).trim()
+    : "";
+
+  const pow = Number((powRaw || "").replace(/\D/g, ""));
   const kills = Number((killsRaw || "").replace(/\D/g, ""));
-  return (Number.isFinite(pow) && pow > 1000) || (Number.isFinite(kills) && kills > 1000);
+
+  return (
+    (Number.isFinite(pow) && pow > 1000) ||
+    (Number.isFinite(kills) && kills > 1000)
+  );
 }
 
+// чекаємо поки профіль справді відкрився (або здались)
 async function waitProfileOrGiveUp(timeoutMs = 3200, pollMs = 250) {
   const end = Date.now() + timeoutMs;
   await sleepLog(120, "before profile poll");
+
   while (Date.now() < end) {
     if (await isProfileScreen()) return true;
+
     if (await isCityHallList()) {
       await sleepLog(pollMs, "still in list");
       continue;
     }
+
     await sleepLog(pollMs, "poll profile");
   }
   return false;
 }
 
-/* ===================== Row taps (supports rect) ===================== */
+/* ──────────────────────── open row tap logic ──────────────────────── */
+
 function rowPoint(i) {
   const r = LIST.rows[i];
   if (!r) throw new Error(`cityHallList.rows[${i}] missing`);
+
   if (r.rect && hasRect(r.rect)) {
-    return pickPointInRect(r.rect); // випадкова точка всередині
+    return pickPointInRect(r.rect);
   }
   return clampToSafe({ x: r.x, y: r.y });
 }
 
+// відкриваємо профіль певного рядка
 async function openProfileFromRow(idx, retries = 2) {
   if (!Number.isInteger(idx) || idx < 0 || idx >= LIST.rows.length) {
-    console.warn(`   ! openProfileFromRow: idx ${idx} out of range`);
+    console.warn(`! openProfileFromRow: idx ${idx} out of range`);
     logAction("rowTap-invalid", { idx });
     return false;
   }
+
   for (let attempt = 1; attempt <= retries; attempt++) {
     const p = rowPoint(idx);
     logAction("rowTap", { idx, attempt, picked: p });
+
     await adbTapExact(p.x, p.y, 120, { idx, attempt });
     await sleepLog(T_SETTLE + T_JITTER(), "after row tap");
+
     if (await waitProfileOrGiveUp(3200, 250)) return true;
+
     await sleepLog(200 + randInt(0, 200), "retry row tap");
   }
   return false;
 }
 
+// fallback: базовий рядок, потім base+1, base+2
 async function openProfileWithFallbacks(baseIdx = BASE_ROW_IDX) {
   const candidates = [baseIdx, baseIdx + 1, baseIdx + 2].filter(
-    i => i < LIST.rows.length
+    (i) => i < LIST.rows.length
   );
   logAction("fallback-start", { baseIdx, candidates });
+
   for (const i of candidates) {
     const ok = await openProfileFromRow(i, i === baseIdx ? 3 : 2);
     if (ok) {
@@ -459,11 +547,13 @@ async function openProfileWithFallbacks(baseIdx = BASE_ROW_IDX) {
       return { opened: true, usedIndex: i };
     }
   }
+
   logAction("fallback-failed", { baseIdx });
   return { opened: false, usedIndex: -1 };
 }
 
-/* ===================== Clipboard name capture ===================== */
+/* ──────────────────────── clipboard name capture ──────────────────────── */
+
 async function clipboardSetEmptyADB() {
   try {
     await execa(
@@ -485,7 +575,10 @@ async function clipboardGetADB() {
     return "";
   }
 }
-async function waitClipboardNonEmptyADB(maxMs = T_CLIP_ADB, stepMs = T_CLIP_STEP) {
+async function waitClipboardNonEmptyADB(
+  maxMs = T_CLIP_ADB,
+  stepMs = T_CLIP_STEP
+) {
   const end = Date.now() + maxMs;
   while (Date.now() < end) {
     const t = await clipboardGetADB();
@@ -494,13 +587,24 @@ async function waitClipboardNonEmptyADB(maxMs = T_CLIP_ADB, stepMs = T_CLIP_STEP
   }
   return "";
 }
+
 async function clipboardSetEmptyHost() {
-  try { await clipboardy.write(""); } catch {}
+  try {
+    await clipboardy.write("");
+  } catch {}
 }
 async function clipboardGetHost() {
-  try { return (await clipboardy.read()) ?? ""; } catch { return ""; }
+  try {
+    return (await clipboardy.read()) ?? "";
+  } catch {
+    return "";
+  }
 }
-async function waitClipboardNonEmptyHost(prev = "", maxMs = T_CLIP_HOST, stepMs = T_CLIP_STEP) {
+async function waitClipboardNonEmptyHost(
+  prev = "",
+  maxMs = T_CLIP_HOST,
+  stepMs = T_CLIP_STEP
+) {
   const end = Date.now() + maxMs;
   while (Date.now() < end) {
     const t = await clipboardGetHost();
@@ -510,68 +614,84 @@ async function waitClipboardNonEmptyHost(prev = "", maxMs = T_CLIP_HOST, stepMs 
   return "";
 }
 
-// подвійний тап по імені (copyName) з довшою паузою між тапами (0.5–1.1с),
-// потім читаємо буфер
+// Копіюємо імʼя: подвійний тап у ту ж точку з паузою 0.5–1.1с.
+// Якщо не вдалось — лонгпрес + KEYCODE_COPY.
 async function copyNameIntoTexts(texts) {
   await clipboardSetEmptyADB();
+
   let hostPrev = "";
   if (USE_HOST_CLIPBOARD) {
     await clipboardSetEmptyHost();
     hostPrev = await clipboardGetHost();
   }
 
-  const action = actionCopyFromRegions() || FLOW.copyName;
-  const p = regionNameCenter();
+  const clickAction = actionCopyFromRegions() || FLOW.copyName;
+  const tapPoint = regionNameCenter();
 
-  // Тап #1
-  if (action) {
-    logAction("copyName-tap1", { action });
-    await navigateHuman(action);
-  } else if (p) {
-    logAction("copyName-tap1", { point: p });
-    await adbTapExact(p.x, p.y, 120);
+  // тап #1
+  if (clickAction) {
+    logAction("copyName-tap1", { action: clickAction });
+    await navigateHuman(clickAction);
+  } else if (tapPoint) {
+    logAction("copyName-tap1", { point: tapPoint });
+    await adbTapExact(tapPoint.x, tapPoint.y, 120);
   }
 
-  // більш довга людська пауза (щоб гра гарантовано оновила виділення)
+  // довга пауза між тапами
   await sleepLog(randMs(500, 1100), "between name taps");
 
-  // Тап #2
-  if (action) {
-    logAction("copyName-tap2", { action });
-    await navigateHuman(action);
-  } else if (p) {
-    logAction("copyName-tap2", { point: p });
-    await adbTapExact(p.x, p.y, 120);
+  // тап #2
+  if (clickAction) {
+    logAction("copyName-tap2", { action: clickAction });
+    await navigateHuman(clickAction);
+  } else if (tapPoint) {
+    logAction("copyName-tap2", { point: tapPoint });
+    await adbTapExact(tapPoint.x, tapPoint.y, 120);
   }
 
-  // дати грі час оновити буфер
-  await sleepLog(T_OCR_NAME_GUESS + randInt(0, 120), "wait copyName");
+  await sleepLog(
+    T_OCR_NAME_GUESS + randInt(0, 120),
+    "wait copyName clipboard"
+  );
 
-  // пробуємо зчитати буфер
+  // читаємо буфер
   let clip = await waitClipboardNonEmptyADB(T_CLIP_ADB, T_CLIP_STEP);
+
   if (!clip && USE_HOST_CLIPBOARD) {
-    clip = await waitClipboardNonEmptyHost(hostPrev, T_CLIP_HOST, T_CLIP_STEP);
+    clip = await waitClipboardNonEmptyHost(
+      hostPrev,
+      T_CLIP_HOST,
+      T_CLIP_STEP
+    );
   }
 
   // fallback: longpress + KEYCODE_COPY
-  if (!clip && p) {
+  if (!clip && tapPoint) {
     try {
-      const x = Math.round(p.x), y = Math.round(p.y);
+      const x = Math.round(tapPoint.x),
+        y = Math.round(tapPoint.y);
       logAction("longpress", { x, y, dur: T_LONGPRESS });
+
       await execa(
         ADB,
         adbArgs([
-          "shell","input","swipe",
-          String(x), String(y),
-          String(x), String(y),
-          String(T_LONGPRESS + randInt(-60, 60))
+          "shell",
+          "input",
+          "swipe",
+          String(x),
+          String(y),
+          String(x),
+          String(y),
+          String(T_LONGPRESS + randInt(-60, 60)),
         ]),
         { encoding: "buffer" }
       );
     } catch {}
+
     await sleepLog(200 + randInt(0, 120), "after longpress");
     await sendKeyevent(278); // KEYCODE_COPY
     clip = await waitClipboardNonEmptyADB(2000, 180);
+
     if (!clip && USE_HOST_CLIPBOARD) {
       clip = await waitClipboardNonEmptyHost(hostPrev, 2500, 200);
     }
@@ -585,9 +705,10 @@ async function copyNameIntoTexts(texts) {
   }
 }
 
-/* ===================== Profile scan ===================== */
+/* ──────────────────────── scanProfileOnce() ──────────────────────── */
+
 async function scanProfileOnce() {
-  // трішки чекаємо щоб профіль точно відмалювався
+  // дати профілю прогрузитись
   await sleepLog(PRE_SCAN_SETTLE_MS, "pre-scan settle");
 
   const texts = {};
@@ -595,15 +716,14 @@ async function scanProfileOnce() {
   await sleepLog(120 + randInt(0, 150), "after copyName");
 
   for (const page of CFG.pages) {
-    // На "bottom" іноді робимо фейкові свайпи (імітуємо скрол смертей),
-    // але не КОЖЕН раз
-    if (page.name === "bottom") {
-      if (Math.random() < FAKE_SWIPE_PROB) {
-        await fakeSwipeInDead();
-      }
+    // іноді фейково скролимо смерть/втрати
+    if (page.name === "bottom" && Math.random() < FAKE_SWIPE_PROB) {
+      await fakeSwipeInDead();
     }
 
+    // робимо скрін, кропаємо всі ROI на сторінці, ганяємо OCR
     await captureScreen(SCREEN_PATH);
+
     const rois = await cropRegions(
       SCREEN_PATH,
       page.rois,
@@ -616,7 +736,7 @@ async function scanProfileOnce() {
           const guess = await ocrField(k, buf);
           if (guess) texts.name = guess;
         } else {
-          // просто для логів
+          // чисто для логів щоб бачити як OCRить імʼя екраном
           await ocrField(k, buf);
         }
       } else {
@@ -625,6 +745,7 @@ async function scanProfileOnce() {
       await sleepLog(randInt(20, 60), "between ocr fields");
     }
 
+    // перегортаємо сторінку, якщо треба
     if (page.nav) {
       logAction("page-nav", { page: page.name, nav: page.nav });
       await navigateHuman(page.nav);
@@ -632,7 +753,7 @@ async function scanProfileOnce() {
     }
   }
 
-  // safety: якщо id погано розпізнався — перепробуємо верхню сторінку
+  // якщо id не розпізналося стабільно, ще раз на верхній сторінці
   const idDigits = (texts.id || "").replace(/\D/g, "");
   if (!idDigits || idDigits.length < 5) {
     const first = CFG.pages[0];
@@ -647,21 +768,115 @@ async function scanProfileOnce() {
     }
   }
 
-  // parseStats має скласти об'єкт:
+  // parseStats робить нормальний обʼєкт:
   // {
   //   id, name,
   //   power,
-  //   kp,        <-- Kill Points (ОБОВ'ЯЗКОВО)
+  //   kp,         // Kill Points TOTAL
   //   dead,
   //   t1,t2,t3,t4,t5
   // }
-  // (kills як "тільки t4+t5" нам вже не потрібен)
   const parsed = parseStats(texts);
   logAction("scanProfileOnce-result", { parsed });
   return parsed;
 }
 
-/* ===================== Navigation (open/back/list checks) ===================== */
+/* ──────────────────────── city hall detection ──────────────────────── */
+
+async function isCityHallByHeader() {
+  await captureScreen(SCREEN_PATH);
+
+  const piece = await cropRegions(
+    SCREEN_PATH,
+    { hdr: ANCHOR_CITYHALL },
+    path.join(ROOT_DIR, "screenshots", "anchors")
+  );
+
+  const buf = piece.hdr;
+  const txt = buf ? (await ocrBuffer(buf, null)).toLowerCase() : "";
+  const ok = txt.includes("city") && txt.includes("hall");
+  logAction("probe-cityhall-header", { text: txt, ok });
+  return ok;
+}
+
+async function isCityHallByLevel() {
+  const n = await readLevelAtRow(0);
+  const ok = Number.isFinite(n) && n >= 1 && n <= 25;
+  logAction("probe-cityhall-level", { n, ok });
+  return ok;
+}
+
+async function isCityHallList() {
+  const ok = (await isCityHallByHeader()) || (await isCityHallByLevel());
+  logAction("probe-cityhall", { ok });
+  return ok;
+}
+
+/* ──────────────────────── backToCityHallList() ──────────────────────── */
+/**
+ * Повернення назад до списку:
+ * 1) подвійний тап по FLOW.closeDeath (з паузою 0.5-1.1s)
+ * 2) закрити профіль через FLOW.closeProfile
+ */
+async function backToCityHallList() {
+  // тап #1 по "закрити death"
+  logAction("back", { step: "closeDeath#1" });
+  await navigateHuman(FLOW.closeDeath);
+
+  // пауза як людина
+  await sleepLog(randMs(500, 1100), "between closeDeath taps");
+
+  // тап #2 на всякий випадок
+  logAction("back", { step: "closeDeath#2" });
+  await navigateHuman(FLOW.closeDeath);
+
+  await sleepLog(T_SETTLE, "after closeDeath double tap");
+
+  // власне закриття профілю
+  logAction("back", { step: "closeProfile" });
+  await navigateHuman(FLOW.closeProfile);
+  await sleepLog(T_SETTLE, "after closeProfile");
+
+  return true;
+}
+
+/* ──────────────────────── backups to JSON ──────────────────────── */
+
+async function readBackupArray(filePath) {
+  try {
+    const txt = await fs.readFile(filePath, "utf-8");
+    const arr = JSON.parse(txt);
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+
+async function appendBackup(filePath, record) {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  const arr = await readBackupArray(filePath);
+  arr.push(record);
+  await fs.writeFile(filePath, JSON.stringify(arr, null, 2));
+}
+
+/* ──────────────────────── idle pause ──────────────────────── */
+
+let _lastIdleTs = Date.now();
+async function maybeIdlePause() {
+  const period = Math.max(0, IDLE_EVERY_MIN) * 60_000;
+  if (!period) return;
+
+  const now = Date.now();
+  if (now - _lastIdleTs >= period) {
+    const ms = randInt(IDLE_MIN_MS, IDLE_MAX_MS);
+    await sleepLog(ms, "idle pause");
+    _lastIdleTs = Date.now();
+  }
+}
+
+/* ──────────────────────── high-level steps ──────────────────────── */
+
+// крок 1: відкрити City Hall рейтинг з профілю
 async function openCityHallList() {
   logAction("nav-seq", { step: "openMyProfile" });
   await navigateHuman(FLOW.openMyProfile);
@@ -676,108 +891,70 @@ async function openCityHallList() {
   await sleepLog(T_SETTLE + T_JITTER(), "after openCityHall");
 }
 
-async function isCityHallByHeader() {
-  await captureScreen(SCREEN_PATH);
-  const piece = await cropRegions(
-    SCREEN_PATH,
-    { hdr: ANCHOR_CITYHALL },
-    path.join(ROOT_DIR, "screenshots", "anchors")
-  );
-  const buf = piece.hdr;
-  const txt = buf ? (await ocrBuffer(buf, null)).toLowerCase() : "";
-  const ok = txt.includes("city") && txt.includes("hall");
-  logAction("probe-cityhall-header", { text: txt, ok });
-  return ok;
-}
-async function isCityHallByLevel() {
-  const n = await readLevelAtRow(0);
-  const ok = Number.isFinite(n) && n >= 1 && n <= 25;
-  logAction("probe-cityhall-level", { n, ok });
-  return ok;
-}
-async function isCityHallList() {
-  const ok = (await isCityHallByHeader()) || (await isCityHallByLevel());
-  logAction("probe-cityhall", { ok });
-  return ok;
-}
+// крок 2: відкрити один профіль, просканити, записати в БД, зробити goal за потреби, повернутися в список
+async function handleOneProfile(openedOk, run_id) {
+  if (!openedOk) return { saved: false };
 
-// повернення назад у список:
-//  1) подвійний тап по closeDeath (з паузою 0.5-1.1с)
-//  2) закрити профіль
-async function backToCityHallList() {
-  // перший тап по кнопці, яка закриває "мертві"/деталі
-  logAction("back", { step: "closeDeath#1" });
-  await navigateHuman(FLOW.closeDeath);
+  // OCR
+  const stats = await scanProfileOnce();
+  const stamp = { run_id, at: new Date().toISOString(), stats };
 
-  // довша рандомна пауза
-  await sleepLog(randMs(500, 1100), "between closeDeath taps");
+  // player_id
+  const pid = Number(String(stats?.id || "").replace(/\D/g, ""));
 
-  // другий тап — якщо перший не спрацював / гра лагнула
-  logAction("back", { step: "closeDeath#2" });
-  await navigateHuman(FLOW.closeDeath);
+  if (Number.isFinite(pid) && String(pid).length >= 5) {
+    console.log(`   Save ${pid} "${stats.name || ""}"`);
+    logAction("save-player", { pid, name: stats.name || "" });
 
-  await sleepLog(T_SETTLE, "after closeDeath double tap");
+    // в базу
+    await saveScan(run_id, stats);
 
-  // потім звичайне закриття профілю
-  logAction("back", { step: "closeProfile" });
-  await navigateHuman(FLOW.closeProfile);
-  await sleepLog(T_SETTLE, "after closeProfile");
+    // KvK goals тільки в baseline режимі
+    if (BASELINE_MODE) {
+      try {
+        const res = await kvkEnsureGoal(pid);
+        if (res) logAction("kvkEnsureGoal", { pid, res });
+      } catch (e) {
+        logAction("kvkEnsureGoal-error", {
+          pid,
+          error: e?.message || String(e),
+        });
+      }
+    }
 
-  return true;
-}
-
-/* ===================== JSON backups ===================== */
-async function readBackupArray(filePath) {
-  try {
-    const txt = await fs.readFile(filePath, "utf-8");
-    const arr = JSON.parse(txt);
-    return Array.isArray(arr) ? arr : [];
-  } catch {
-    return [];
-  }
-}
-async function appendBackup(filePath, record) {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  const arr = await readBackupArray(filePath);
-  arr.push(record);
-  await fs.writeFile(filePath, JSON.stringify(arr, null, 2));
-}
-
-/* ===================== IDLE-пауза раз на N хвилин ===================== */
-let _lastIdleTs = Date.now();
-async function maybeIdlePause() {
-  const period = Math.max(0, IDLE_EVERY_MIN) * 60_000;
-  if (!period) return;
-  const now = Date.now();
-  if (now - _lastIdleTs >= period) {
-    const ms = randInt(IDLE_MIN_MS, IDLE_MAX_MS);
-    await sleepLog(ms, "idle pause");
-    _lastIdleTs = Date.now();
+    // backup JSON
+    return { saved: true, stamp };
+  } else {
+    console.warn("   ! No reliable player id recognized, skipped");
+    logAction("save-skip-noid", { stats });
+    return { saved: false };
   }
 }
 
-/* ===================== Main ===================== */
+/* ──────────────────────── main() ──────────────────────── */
+
 async function main() {
-  await initSchema();
+  await initSchema(); // <- важливо при пустій БД
   await initOCR();
 
-  const active = await kvkActiveId();
-  console.log(`Active KvK: ${active ?? "<none>"}`);
+  const activeKvK = await kvkActiveId();
+  console.log(`Active KvK: ${activeKvK ?? "<none>"}`);
 
   const run_id = await beginRun();
   console.log(`Run: ${run_id} | CityHall25`);
 
+  // файли бекопів (зручно дебажити без БД)
   const backupAllPath = path.join(OUT_DIR, "players.json");
   const backupRunPath = path.join(OUT_DIR, `run-${run_id}.json`);
   await fs.writeFile(backupRunPath, "[]").catch(() => {});
 
-  // заходимо в рейтинг → City Hall list
+  // заходимо в рейтинг
   await openCityHallList();
   await humanPause();
 
   let visited = 0;
 
-  // ---- ФАЗА 1: індекси 0..BASE_ROW_IDX-1 (розігрів) ----
+  // ── ФАЗА 1: пройти верх списку до BASE_ROW_IDX-1 (гріємо емуль, пропускаємо не-СН25)
   for (
     let i = 0;
     i < Math.min(BASE_ROW_IDX, LIST.rows.length) && visited < COUNT;
@@ -785,13 +962,16 @@ async function main() {
   ) {
     await maybeIdlePause();
 
-    // якщо це не останній рядок - перевіримо що там CH=25
+    // якщо це не останній рядок у видимій пачці — перевіримо що там City Hall == 25
     if (i < LIST.rows.length - 1) {
       const lvl = await readLevelAtRow(i);
       if (lvl !== 25) {
-        console.log(`   Skip row ${i}: CH=${Number.isNaN(lvl) ? "?" : lvl}`);
+        console.log(
+          `   Skip row ${i}: CH=${Number.isNaN(lvl) ? "?" : lvl}`
+        );
         logAction("row-skip", { idx: i, lvl });
         await sleepLog(200 + T_JITTER(), "after skip non-25");
+
         visited++;
         await humanPause();
         continue;
@@ -802,39 +982,16 @@ async function main() {
     if (!opened) {
       console.warn(`   ! Row ${i} did not open — skip`);
       logAction("row-open-failed", { idx: i });
+
       visited++;
       await humanPause();
       continue;
     }
 
-    // профіль відкрито — скануємо
-    const stats = await scanProfileOnce();
-    const stamp = { run_id, at: new Date().toISOString(), stats };
-
-    // отримати player_id
-    const pid = Number(String(stats?.id || "").replace(/\D/g, ""));
-    if (Number.isFinite(pid) && String(pid).length >= 5) {
-      console.log(`   Save ${pid} "${stats.name || ""}"`);
-      logAction("save-player", { pid, name: stats.name || "" });
-
-      // запис у БД
-      await saveScan(run_id, stats);
-
-      // цілі створюємо тільки у baseline режимі
-      if (BASELINE_MODE) {
-        try {
-          const res = await kvkEnsureGoal(pid);
-          if (res) logAction("kvkEnsureGoal", { pid, res });
-        } catch (e) {
-          logAction("kvkEnsureGoal-error", { pid, error: e?.message || String(e) });
-        }
-      }
-
+    const { saved, stamp } = await handleOneProfile(opened, run_id);
+    if (saved && stamp) {
       await appendBackup(backupAllPath, stamp);
       await appendBackup(backupRunPath, stamp);
-    } else {
-      console.warn("   ! No reliable player id recognized, skipped");
-      logAction("save-skip-noid", { stats });
     }
 
     const ok = await backToCityHallList();
@@ -849,43 +1006,26 @@ async function main() {
     await maybeIdlePause();
   }
 
-  // ---- ФАЗА 2: крутимось навколо BASE_ROW_IDX із fallback 5→6→7 ----
+  // ── ФАЗА 2: фарм базового рядка BASE_ROW_IDX з fallback (base → base+1 → base+2)
   while (visited < COUNT) {
     await maybeIdlePause();
 
-    const { opened, usedIndex } = await openProfileWithFallbacks(BASE_ROW_IDX);
+    const { opened, usedIndex } = await openProfileWithFallbacks(
+      BASE_ROW_IDX
+    );
     if (!opened) {
       console.warn("   ! Ghost chain (5/6/7) — skip this slot");
       logAction("ghost-chain-skip", {});
+
       visited++;
       await humanPause();
       continue;
     }
 
-    const stats = await scanProfileOnce();
-    const stamp = { run_id, at: new Date().toISOString(), stats };
-
-    const pid = Number(String(stats?.id || "").replace(/\D/g, ""));
-    if (Number.isFinite(pid) && String(pid).length >= 5) {
-      console.log(`   Save ${pid} "${stats.name || ""}"`);
-      logAction("save-player", { pid, name: stats.name || "" });
-
-      await saveScan(run_id, stats);
-
-      if (BASELINE_MODE) {
-        try {
-          const res = await kvkEnsureGoal(pid);
-          if (res) logAction("kvkEnsureGoal", { pid, res });
-        } catch (e) {
-          logAction("kvkEnsureGoal-error", { pid, error: e?.message || String(e) });
-        }
-      }
-
+    const { saved, stamp } = await handleOneProfile(opened, run_id);
+    if (saved && stamp) {
       await appendBackup(backupAllPath, stamp);
       await appendBackup(backupRunPath, stamp);
-    } else {
-      console.warn("   ! No reliable player id recognized, skipped");
-      logAction("save-skip-noid", { stats });
     }
 
     const ok = await backToCityHallList();
@@ -900,28 +1040,44 @@ async function main() {
     await maybeIdlePause();
 
     if (usedIndex !== BASE_ROW_IDX) {
-      console.log(`   Used fallback row ${usedIndex} → next loop presses base 5 again`);
+      console.log(
+        `   Used fallback row ${usedIndex} → next loop presses base 5 again`
+      );
       logAction("fallback-keep-base", { usedIndex });
     }
   }
 
+  // лог фіналу
   console.log(`\n✓ Done: visited ${visited} rows`);
+
   const actionsPath = path.join(OUT_DIR, `actions-run-${run_id}.json`);
   await fs.writeFile(actionsPath, JSON.stringify(ACTION_LOG, null, 2));
-  console.log(`Action log saved: ${path.relative(ROOT_DIR, actionsPath)}`);
+  console.log(
+    `Action log saved: ${path.relative(ROOT_DIR, actionsPath)}`
+  );
 
-  console.log(`Backups:\n  - ${path.relative(ROOT_DIR, backupAllPath)}\n  - ${path.relative(ROOT_DIR, backupRunPath)}`);
+  console.log(
+    `Backups:\n  - ${path.relative(
+      ROOT_DIR,
+      backupAllPath
+    )}\n  - ${path.relative(ROOT_DIR, backupRunPath)}`
+  );
 
-  // зона логіка: якщо запущено як `zone "<name>" start|finish`
+  // зона-логіка
   if (ZONE_MODE) {
     try {
       if (ZONE_MODE.mode === "start") {
         await zoneStart(ZONE_MODE.name, run_id);
-        console.log(`Zone "${ZONE_MODE.name}": START stored (run_id ${run_id})`);
+        console.log(
+          `Zone "${ZONE_MODE.name}": START stored (run_id ${run_id})`
+        );
       } else if (ZONE_MODE.mode === "finish") {
         await zoneFinish(ZONE_MODE.name, run_id);
-        console.log(`Zone "${ZONE_MODE.name}": FINISH stored (run_id ${run_id})`);
+        console.log(
+          `Zone "${ZONE_MODE.name}": FINISH stored (run_id ${run_id})`
+        );
       }
+
       const zr = await getZone(ZONE_MODE.name);
       console.log("Zone record:", zr);
     } catch (e) {
@@ -929,21 +1085,39 @@ async function main() {
     }
   }
 
-  await closeOCR();
-  await closeDb();
+  return run_id;
 }
 
-main().catch(async (e) => {
-  console.error(e);
+/* ──────────────────────── runner with cleanup ──────────────────────── */
+
+(async () => {
+  let fatal = null;
+  let run_id_for_logs = null;
+
   try {
-    const actionsPath = path.join(
-      OUT_DIR,
-      `actions-run-error-${Date.now()}.json`
-    );
-    await fs.writeFile(actionsPath, JSON.stringify(ACTION_LOG, null, 2));
-    console.log(`Action log (error) saved: ${actionsPath}`);
-  } catch {}
-  await closeOCR().catch(() => {});
-  await closeDb().catch(() => {});
-  process.exit(1);
-});
+    run_id_for_logs = await main();
+  } catch (e) {
+    fatal = e;
+    console.error(e);
+
+    // у випадку падіння теж пробуємо зберегти ACTION_LOG щоб можна було дебажити
+    try {
+      const actionsPath = path.join(
+        OUT_DIR,
+        `actions-run-error-${Date.now()}.json`
+      );
+      await fs.writeFile(actionsPath, JSON.stringify(ACTION_LOG, null, 2));
+      console.log(`Action log (error) saved: ${actionsPath}`);
+    } catch {}
+  } finally {
+    // завжди закриваємо OCR і БД
+    await closeOCR().catch(() => {});
+    await closeDb().catch(() => {});
+  }
+
+  if (fatal) {
+    process.exitCode = 1;
+  } else {
+    console.log(`Scan complete. Run ${run_id_for_logs}`);
+  }
+})();
