@@ -1,19 +1,28 @@
 // src/bot.js
-// Discord бот, адаптований під твою модель прогресу:
-//  - KP (kill points) показуємо тільки у верхній панелі як "красива цифра"
-//  - Реальний прогрес KvK рахується як Т4+Т5 (killsDone) + Dead (deadDone)
-//  - Цілі: goal_kills / goal_dead / goal_dkp
-//  - DKP = kills_weight * killsDone + dead_to_kills * deadDone
+// Discord bot for KvK tracking.
+// - "Kill Points" (kp) is just shown as a nice number in the header
+// - Real KvK progress is based on T4+T5 kills and Dead
+// - Goals: goal_kills / goal_dead / goal_dkp (currently goal_kills is stored in DB as goal_kp)
+// - DKP = kills_weight * killsDone(T4+T5) + dead_to_kills * deadDone
 //
-// Карта показує:
-//   Power / Kill Points / Dead / T5 / T4 (з latest)
-//   Bars: Kills(T4+T5), Dead, DKP (проти goal)
-//   LEFT блок = скільки залишилось
-//   RIGHT блок = остання завершена зона
-//   бейдж зверху справа = % до goal_dkp + текст ("WARM UP", "ON TRACK" і т.д.)
+// Player card shows:
+//   • Power / Kill Points / Dead / T5 / T4 from latest snapshot
+//   • Each of those now also shows the delta since war work began (we approximate with total zone deltas).
+//     Green if it's positive/zero, red if negative.
+//   • Bars: Kills(T4+T5), Dead, DKP (vs goals)
+//   • "LEFT TO GO": how much is left to hit goals
+//   • "YOUR LAST FIGHTS": last finished zone activity
+//   • Badge: % DKP progress + label ("WARM UP", "ON TRACK", etc.)
+//   • "Updated:" shows LAST SCAN time from DB (latest.updated_at), NOT when the command was typed.
 //
-// Команди публічні: !stats <id>, !me, !link, !unlink, !help
-// Команди адмінські: !kvk ..., !top ...
+// KvK Top PNG:
+//   • Renders current leaderboard by % of DKP goal
+//   • "Updated:" = max(updated_at) among those players in `latest`
+//
+// Public commands: !stats <id>, !me, !link, !unlink, !help
+// Admin commands:  !kvk ..., !top ...
+//
+// All outward text is now English.
 
 import "dotenv/config";
 import {
@@ -26,6 +35,7 @@ import { Pool } from "pg";
 import sharp from "sharp";
 import { createHash } from "node:crypto";
 import http from "http";
+
 import {
   initSchema,
   kvkStart,
@@ -38,7 +48,7 @@ import {
   fetchStatsByRun, // Map(player_id -> row for that run_id)
 } from "./db.pg.js";
 
-// простий healthcheck для платформи
+/* ───────────── healthcheck server ───────────── */
 const PORT = process.env.PORT || 3000;
 http
   .createServer((req, res) => {
@@ -49,18 +59,17 @@ http
     console.log("healthcheck server on :" + PORT);
   });
 
-
 /* ───────────── env / config ───────────── */
 
 const ADMIN_ROLE_IDS = String(process.env.ADMIN_ROLE_IDS || "")
   .split(",")
-  .map(s => s.trim())
+  .map((s) => s.trim())
   .filter(Boolean);
 
 const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID || "";
 
 const IMG_CACHE_TTL_S = Number(process.env.IMG_CACHE_TTL_S || 60);
-const IMG_CACHE_MAX   = Number(process.env.IMG_CACHE_MAX || 120);
+const IMG_CACHE_MAX = Number(process.env.IMG_CACHE_MAX || 120);
 
 const HEAVY_CMD_COOLDOWN_S = Number(process.env.HEAVY_CMD_COOLDOWN_S || 4);
 
@@ -83,16 +92,34 @@ function baseCtx(msg) {
 }
 function logAt(level, obj) {
   if (LEVELS[level] < (LEVELS[LOG_LEVEL] ?? 20)) return;
-  try { console.log(JSON.stringify({ level, ...obj })); } catch {}
+  try {
+    console.log(JSON.stringify({ level, ...obj }));
+  } catch {}
 }
 const log = {
-  debug: o => logAt("debug", o),
-  info : o => logAt("info" , o),
-  warn : o => logAt("warn" , o),
-  error: o => logAt("error", o),
+  debug: (o) => logAt("debug", o),
+  info: (o) => logAt("info", o),
+  warn: (o) => logAt("warn", o),
+  error: (o) => logAt("error", o),
 };
 
 /* ───────────── helpers ───────────── */
+
+function formatTs(tsLike) {
+  // use the DB scan time, not "now"
+  if (!tsLike) return "-";
+  const d = new Date(tsLike);
+  if (isNaN(d.getTime())) return "-";
+  return d.toLocaleString("en-US", {
+    hour12: true,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
 
 const nf = (x) =>
   new Intl.NumberFormat("en-US").format(
@@ -108,11 +135,9 @@ function isAdmin(msg) {
   const m = msg.member;
   if (!m) return false;
   if (ADMIN_ROLE_IDS.length) {
-    return m.roles?.cache?.some(r => ADMIN_ROLE_IDS.includes(r.id)) || false;
+    return m.roles?.cache?.some((r) => ADMIN_ROLE_IDS.includes(r.id)) || false;
   }
-  return (
-    m.permissions?.has(PermissionsBitField.Flags.Administrator) || false
-  );
+  return m.permissions?.has(PermissionsBitField.Flags.Administrator) || false;
 }
 
 const lastHeavyUse = new Map(); // userId -> timestamp(ms)
@@ -125,20 +150,32 @@ function checkCooldown(userId) {
   return 0;
 }
 
-// підрізати ім'я у таблицях
+// shorten long names in lists
 function trimName(s = "", max = 22) {
   s = String(s || "");
   return s.length > max ? s.slice(0, max - 1) + "…" : s;
 }
 
-// бейдж за % DKP
+// badge label by DKP %
 function autoTag(pct) {
   const v = Number(pct) || 0;
   if (v >= 170) return "WHALE KILLER";
   if (v >= 140) return "OVERDRIVE";
   if (v >= 110) return "OVERCAP";
-  if (v >= 90)  return "ON TRACK";
+  if (v >= 90) return "ON TRACK";
   return "WARM UP";
+}
+
+// delta formatter for "+123,456" and text color
+function deltaPieces(v, nfFn) {
+  const n = Number(v || 0);
+  const sign = n >= 0 ? "+" : "-";
+  const absVal = Math.abs(n);
+  const color = n >= 0 ? "#5CFF5C" : "#FF5C5C"; // green / red
+  return {
+    text: `${sign}${nfFn(absVal)}`,
+    color,
+  };
 }
 
 /* ───────────── DB pool ───────────── */
@@ -151,7 +188,7 @@ const pool = new Pool({
 // make sure schema exists
 await initSchema();
 
-// зв'язок discord_id -> player_id
+// discord_id -> player_id link table
 await pool.query(`
   CREATE TABLE IF NOT EXISTS discord_links (
     discord_id TEXT PRIMARY KEY,
@@ -177,10 +214,12 @@ async function setLink(discordId, playerId) {
 }
 
 async function removeLink(discordId) {
-  await pool.query(`DELETE FROM discord_links WHERE discord_id=$1`, [discordId]);
+  await pool.query(`DELETE FROM discord_links WHERE discord_id=$1`, [
+    discordId,
+  ]);
 }
 
-// останній зліпок гравця з таблиці latest
+// last snapshot from latest
 async function fetchLatestById(id) {
   const { rows } = await pool.query(
     `SELECT l.player_id,
@@ -197,8 +236,7 @@ async function fetchLatestById(id) {
   return rows[0] || null;
 }
 
-// топ по snapshot (latest)
-// by = "kp" (kill points total) або "power"
+// snapshot leaderboard
 async function fetchTop(by = "kp", limit = 10) {
   const col = by === "power" ? "power" : "kp";
   const { rows } = await pool.query(
@@ -212,25 +250,40 @@ async function fetchTop(by = "kp", limit = 10) {
   return rows;
 }
 
-/* ───────────── KvK бойові дельти через зони ─────────────
-   - Збираємо всі зони де end_run_id != NULL (тобто завершені).
-   - Для кожної зони беремо snapshot на start_run_id і на end_run_id.
-   - Дельта по:
-        T4+T5 (це killsDone),
-        Dead,
-        (і power, t4, t5 для інформації).
-   - Складаємо суму по всіх завершених зонах.
+// max scan timestamp among given players
+async function fetchMaxUpdatedAtForPlayers(playerIds) {
+  if (!playerIds.length) return null;
+  const cleanIds = playerIds.map((x) => String(x));
+  const { rows } = await pool.query(
+    `SELECT MAX(updated_at) AS ts
+       FROM latest
+      WHERE player_id = ANY($1::bigint[])`,
+    [cleanIds]
+  );
+  return rows[0]?.ts || null;
+}
+
+/* ───────────── KvK deltas from zones ─────────────
+   We gather all finished zones (zones with end_run_id != NULL).
+   For each zone, we compare snapshot at start_run_id vs end_run_id.
+   We accumulate:
+     - dPower
+     - dKp (kill points gain)
+     - dKills (T4+T5 combined gain)  <-- this is what we use as killsDone
+     - dDead
+     - dT4 / dT5
 */
 
 async function computeZoneSumForPlayer(playerId) {
   const zones = await listZones();
-  const finishedZones = zones.filter(z => z.end_run_id != null);
+  const finishedZones = zones.filter((z) => z.end_run_id != null);
 
   let dPower = 0;
-  let dKills = 0; // приріст (t4+t5)
-  let dDead  = 0;
-  let dT4    = 0;
-  let dT5    = 0;
+  let dKp = 0;
+  let dKills = 0; // (t4+t5)
+  let dDead = 0;
+  let dT4 = 0;
+  let dT5 = 0;
 
   const runCache = new Map(); // run_id -> Map(player_id -> row)
 
@@ -244,43 +297,54 @@ async function computeZoneSumForPlayer(playerId) {
 
   for (const z of finishedZones) {
     const startRunId = Number(z.start_run_id);
-    const endRunId   = Number(z.end_run_id);
+    const endRunId = Number(z.end_run_id);
     if (!Number.isFinite(startRunId) || !Number.isFinite(endRunId)) continue;
 
     const startMap = await getRunMap(startRunId);
-    const endMap   = await getRunMap(endRunId);
+    const endMap = await getRunMap(endRunId);
 
     const s = startMap.get(String(playerId));
     const e = endMap.get(String(playerId));
     if (!s || !e) continue;
 
-    dPower += Math.max(0, Number(e.power || 0) - Number(s.power || 0));
+    // power difference (currently we only count positive gain)
+    const diffPower = Number(e.power || 0) - Number(s.power || 0);
+    if (diffPower !== 0) dPower += diffPower;
 
+    // kill points diff (positive only; kill points shouldn't go down)
+    const diffKp = Number(e.kp || 0) - Number(s.kp || 0);
+    if (diffKp > 0) dKp += diffKp;
+
+    // t4+t5 kills
     const startT45 = Number(s.t4 || 0) + Number(s.t5 || 0);
-    const endT45   = Number(e.t4 || 0) + Number(e.t5 || 0);
-    const diffT45  = endT45 - startT45;
+    const endT45 = Number(e.t4 || 0) + Number(e.t5 || 0);
+    const diffT45 = endT45 - startT45;
     if (diffT45 > 0) {
       dKills += diffT45;
     }
 
+    // dead diff
     const diffDead = Number(e.dead || 0) - Number(s.dead || 0);
     if (diffDead > 0) {
       dDead += diffDead;
     }
 
+    // T4 diff
     const diffT4 = Number(e.t4 || 0) - Number(s.t4 || 0);
     if (diffT4 > 0) dT4 += diffT4;
+
+    // T5 diff
     const diffT5 = Number(e.t5 || 0) - Number(s.t5 || 0);
     if (diffT5 > 0) dT5 += diffT5;
   }
 
-  return { dPower, dKills, dDead, dT4, dT5 };
+  return { dPower, dKp, dKills, dDead, dT4, dT5 };
 }
 
 async function computeLastZoneDeltaForPlayer(playerId) {
   const zones = await listZones();
   const done = zones
-    .filter(z => z.end_run_id != null)
+    .filter((z) => z.end_run_id != null)
     .sort(
       (a, b) =>
         new Date(b.end_time || 0).getTime() -
@@ -299,7 +363,7 @@ async function computeLastZoneDeltaForPlayer(playerId) {
   const full = await getZone(last.zone_name);
 
   const startRunId = Number(full?.start_run_id ?? last.start_run_id);
-  const endRunId   = Number(full?.end_run_id   ?? last.end_run_id);
+  const endRunId = Number(full?.end_run_id ?? last.end_run_id);
 
   if (!Number.isFinite(startRunId) || !Number.isFinite(endRunId)) {
     return {
@@ -325,8 +389,8 @@ async function computeLastZoneDeltaForPlayer(playerId) {
   }
 
   const startT45 = Number(s.t4 || 0) + Number(s.t5 || 0);
-  const endT45   = Number(e.t4 || 0) + Number(e.t5 || 0);
-  const diffT45  = Math.max(0, endT45 - startT45);
+  const endT45 = Number(e.t4 || 0) + Number(e.t5 || 0);
+  const diffT45 = Math.max(0, endT45 - startT45);
 
   const diffDead = Math.max(
     0,
@@ -343,25 +407,22 @@ async function computeLastZoneDeltaForPlayer(playerId) {
 /**
  * buildZoneBasedKvkBundle(playerIdBigInt, latestRow)
  *
- * - беремо активний KvK (kvk_periods де ended_at IS NULL)
- * - тягнемо goal_kp / goal_dead / goal_dkp, які ми ТРАКТИМ як:
- *      goal_kills = goal_kp (тимчасово)
- *      goal_dead
- *      goal_dkp
- * - читаємо ваги kills_weight / dead_to_kills
- * - сумуємо бої по всім завершеним зонам
- * - рахуємо DKP, % до goal_dkp, тексти
+ * Pulls:
+ *  - active KvK config/goal
+ *  - total war deltas (zoneSum)
+ *  - last zone delta
+ *  - DKP math
  */
 async function buildZoneBasedKvkBundle(playerIdBigInt, latest) {
   const active = await kvkActiveId();
 
   let goalKills = 0;
-  let goalDead  = 0;
-  let goalDKP   = 0;
+  let goalDead = 0;
+  let goalDKP = 0;
   let cfg = { kills_weight: 1.0, dead_to_kills: 5.0 };
 
   if (active) {
-    // тут ми поки читаємо goal_kp як goalKills
+    // NOTE: goal_kp is being treated as "goal_kills (T4+T5)".
     const { rows: gRows } = await pool.query(
       `SELECT goal_kp, goal_dead, goal_dkp
          FROM kvk_goals
@@ -370,9 +431,9 @@ async function buildZoneBasedKvkBundle(playerIdBigInt, latest) {
     );
 
     if (gRows[0]) {
-      goalKills = Number(gRows[0].goal_kp   || 0);   // трактуємо як goal_kills
-      goalDead  = Number(gRows[0].goal_dead || 0);
-      goalDKP   = Number(gRows[0].goal_dkp  || 0);
+      goalKills = Number(gRows[0].goal_kp || 0);
+      goalDead = Number(gRows[0].goal_dead || 0);
+      goalDKP = Number(gRows[0].goal_dkp || 0);
     }
 
     const { rows: cRows } = await pool.query(
@@ -386,29 +447,32 @@ async function buildZoneBasedKvkBundle(playerIdBigInt, latest) {
     }
   }
 
-  const zoneSum  = await computeZoneSumForPlayer(playerIdBigInt);
+  // total war work across all finished zones
+  const zoneSum = await computeZoneSumForPlayer(playerIdBigInt);
+
+  // last finished zone
   const lastZone = await computeLastZoneDeltaForPlayer(playerIdBigInt);
 
-  const killsDone = Number(zoneSum.dKills || 0); // наші T4+T5 сумарно
-  const deadDone  = Number(zoneSum.dDead  || 0);
+  const killsDone = Number(zoneSum.dKills || 0); // T4+T5 combined gain
+  const deadDone = Number(zoneSum.dDead || 0);
 
   const dkpDone = Math.round(
-    (Number(cfg.kills_weight   || 0) * killsDone) +
-    (Number(cfg.dead_to_kills  || 0) * deadDone)
+    (Number(cfg.kills_weight || 0) * killsDone) +
+    (Number(cfg.dead_to_kills || 0) * deadDone)
   );
 
   const killsLeft = Math.max(0, goalKills - killsDone);
-  const deadLeft  = Math.max(0, goalDead  - deadDone);
-  const dkpLeft   = Math.max(0, goalDKP   - dkpDone);
+  const deadLeft = Math.max(0, goalDead - deadDone);
+  const dkpLeft = Math.max(0, goalDKP - dkpDone);
 
   const pctRaw = goalDKP > 0 ? (100 * dkpDone / goalDKP) : 0;
 
   return {
-    latest, // snapshot з latest
+    latest, // row from latest (includes updated_at)
     goal: {
       kills: goalKills,
-      dead : goalDead,
-      dkp  : goalDKP,
+      dead: goalDead,
+      dkp: goalDKP,
     },
     progress: {
       killsDone,
@@ -421,16 +485,17 @@ async function buildZoneBasedKvkBundle(playerIdBigInt, latest) {
       tag: autoTag(pctRaw),
     },
     lastZone, // {zoneName,dKillsZone,dDeadZone}
+    zoneSum,  // {dPower,dKp,dKills,dDead,dT4,dT5}
   };
 }
 
 /* ───────────── Card rendering (SVG -> PNG) ───────────── */
 
-function playerCardSVG(card) {
-  const { latest, goal, progress, lastZone } = card;
+function playerCardSVG(bundle) {
+  const { latest, goal, progress, lastZone, zoneSum } = bundle;
 
   const nfNum = (n) =>
-    (n === null || n === undefined)
+    n === null || n === undefined
       ? "0"
       : Number(n).toLocaleString("en-US");
 
@@ -454,14 +519,14 @@ function playerCardSVG(card) {
     lastZone.zoneName &&
     lastZone.zoneName !== "–" &&
     ((lastZone.dKillsZone || 0) > 0 ||
-     (lastZone.dDeadZone  || 0) > 0);
+      (lastZone.dDeadZone || 0) > 0);
 
-  // кольори
-  const bg      = "#0d121d";
+  // colors / layout
+  const bg = "#0d121d";
   const panelBg = "#2a3142";
   const fillCol = "#6b7bff";
   const textCol = "#ffffff";
-  const subCol  = "#9da5bd";
+  const subCol = "#9da5bd";
 
   const w = 1100;
   const h = 620;
@@ -478,17 +543,14 @@ function playerCardSVG(card) {
   const leftBoxX = 50;
   const rightBoxX = 50 + boxW + 50;
 
-  const updatedAtStr = latest.updated_at
-    ? new Date(latest.updated_at).toLocaleString("en-US", {
-        hour12: true,
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-      })
-    : "";
+  const updatedAtStr = formatTs(latest.updated_at);
+
+  // deltas from zoneSum (approx "since KvK started")
+  const dPowerPieces = deltaPieces(zoneSum?.dPower || 0, nfNum);
+  const dKpPieces    = deltaPieces(zoneSum?.dKp    || 0, nfNum);
+  const dDeadPieces  = deltaPieces(zoneSum?.dDead  || 0, nfNum);
+  const dT5Pieces    = deltaPieces(zoneSum?.dT5    || 0, nfNum);
+  const dT4Pieces    = deltaPieces(zoneSum?.dT4    || 0, nfNum);
 
   const lastZoneBox = hasLastZoneData
     ? `
@@ -521,7 +583,7 @@ function playerCardSVG(card) {
      viewBox="0 0 ${w} ${h}"
      style="font-family:Inter,system-ui">
 
-  <!-- фон картки -->
+  <!-- background -->
   <rect x="0" y="0" width="${w}" height="${h}" rx="16" fill="${bg}" />
 
   <style>
@@ -529,7 +591,7 @@ function playerCardSVG(card) {
     .sub     { fill:${subCol};  font-size:14px; font-weight:500; font-family:Inter, system-ui; }
     .metricH { fill:${textCol}; font-size:20px; font-weight:600; font-family:Inter, system-ui; }
     .metricV { fill:${textCol}; font-size:24px; font-weight:600; font-family:Inter, system-ui; }
-    .metricS { fill:${subCol};  font-size:14px; font-weight:500; font-family:Inter, system-ui; }
+    .metricS { font-size:14px; font-weight:500; font-family:Inter, system-ui; }
 
     .barLabel { fill:${textCol}; font-size:14px; font-weight:500; font-family:Inter, system-ui; }
     .barText  { fill:${textCol}; font-size:14px; font-weight:500; font-family:Inter, system-ui; text-anchor:middle; }
@@ -548,8 +610,8 @@ function playerCardSVG(card) {
     </text>
   </g>
 
-  <!-- badge справа: % DKP -->
-  <g transform="translate(${w-140},36)" text-anchor="end">
+  <!-- badge: DKP % -->
+  <g transform="translate(${w - 140},36)" text-anchor="end">
     <text fill="${textCol}" font-size="40" font-weight="600"
           font-family="Inter, system-ui">
       ${Math.round(progress.pct)}%
@@ -566,42 +628,47 @@ function playerCardSVG(card) {
     <g>
       <text class="metricH" x="0"  y="0">Power</text>
       <text class="metricV" x="0"  y="30">${nfNum(latest.power)}</text>
-      <text class="metricS" x="0"  y="48">±0</text>
+      <text class="metricS" x="0"  y="48"
+            fill="${dPowerPieces.color}">${dPowerPieces.text}</text>
     </g>
 
-    <!-- KP (Kill Points total, просто для краси) -->
+    <!-- Kill Points -->
     <g transform="translate(200,0)">
-      <text class="metricH" x="0"  y="0">Kill points</text>
+      <text class="metricH" x="0"  y="0">Kill Points</text>
       <text class="metricV" x="0"  y="30">${nfNum(latest.kp)}</text>
-      <text class="metricS" x="0"  y="48">±0</text>
+      <text class="metricS" x="0"  y="48"
+            fill="${dKpPieces.color}">${dKpPieces.text}</text>
     </g>
 
-    <!-- Dead total -->
+    <!-- Dead -->
     <g transform="translate(400,0)">
       <text class="metricH" x="0"  y="0">Dead</text>
       <text class="metricV" x="0"  y="30">${nfNum(latest.dead)}</text>
-      <text class="metricS" x="0"  y="48">±0</text>
+      <text class="metricS" x="0"  y="48"
+            fill="${dDeadPieces.color}">${dDeadPieces.text}</text>
     </g>
 
-    <!-- T5 total -->
+    <!-- T5 -->
     <g transform="translate(600,0)">
       <text class="metricH" x="0"  y="0">T5</text>
       <text class="metricV" x="0"  y="30">${nfNum(latest.t5)}</text>
-      <text class="metricS" x="0"  y="48">±0</text>
+      <text class="metricS" x="0"  y="48"
+            fill="${dT5Pieces.color}">${dT5Pieces.text}</text>
     </g>
 
-    <!-- T4 total -->
+    <!-- T4 -->
     <g transform="translate(760,0)">
       <text class="metricH" x="0"  y="0">T4</text>
       <text class="metricV" x="0"  y="30">${nfNum(latest.t4)}</text>
-      <text class="metricS" x="0"  y="48">±0</text>
+      <text class="metricS" x="0"  y="48"
+            fill="${dT4Pieces.color}">${dT4Pieces.text}</text>
     </g>
   </g>
 
   <!-- Progress bars block -->
   <g transform="translate(0,190)">
 
-    <!-- Kills bar (T4+T5 приріст vs goal) -->
+    <!-- Kills bar (T4+T5 gain vs goal) -->
     <g transform="translate(0,0)">
       <text class="barLabel" x="${barX}" y="-8">Kills (T4+T5)</text>
 
@@ -631,9 +698,10 @@ function playerCardSVG(card) {
       <rect x="${barX}" y="0" width="${barW}" height="${barH}" rx="4"
             fill="${panelBg}"/>
       <rect x="${barX}" y="0"
-            width="${(barW * pctDead/100).toFixed(1)}"
+            width="${((barW * pctDead)/100).toFixed(1)}"
             height="${barH}" rx="4"
             fill="${fillCol}"/>
+
       <text class="barText"
             x="${barX + barW/2}"
             y="${barH/2 + 4}">
@@ -653,7 +721,7 @@ function playerCardSVG(card) {
       <rect x="${barX}" y="0" width="${barW}" height="${barH}" rx="4"
             fill="${panelBg}"/>
       <rect x="${barX}" y="0"
-            width="${(barW * pctDKP/100).toFixed(1)}"
+            width="${((barW * pctDKP)/100).toFixed(1)}"
             height="${barH}" rx="4"
             fill="${fillCol}"/>
       <text class="barText"
@@ -670,14 +738,14 @@ function playerCardSVG(card) {
 
   </g>
 
-  <!-- Bottom LEFT box: LEFT -->
+  <!-- Bottom LEFT: remaining -->
   <g transform="translate(${leftBoxX}, ${bottomY})">
     <text x="0" y="0"
           font-family="Inter, system-ui"
           font-size="14"
           fill="${subCol}"
           font-weight="500"
-          >LEFT</text>
+          >LEFT TO GO</text>
 
     <rect x="0" y="16"
           width="${boxW}" height="${boxH}"
@@ -716,22 +784,24 @@ async function renderPlayerCardPNG(bundle) {
 
 function hashTopRows(rows) {
   const s = rows
-    .map(r => `${r.player_id}:${r.dkp}:${r.goal_dkp}:${r.pct}`)
+    .map(
+      (r) => `${r.player_id}:${r.dkp}:${r.goal_dkp}:${r.pct}`
+    )
     .join("|");
   return createHash("md5").update(s).digest("hex").slice(0, 12);
 }
 
 function kvkTopSVG(rows, meta = {}) {
-  const W = 1100,
-    H = 120 + rows.length * 56 + 40;
+  const W = 1100;
+  const H = 120 + rows.length * 56 + 40;
 
-  const panel = "#0f1218",
-    card = "#121722",
-    grid = "#1e2633",
-    text = "#e6edf7",
-    sub = "#a9b4c6",
-    track = "#2b3342",
-    color1 = "#7c4dff";
+  const panel = "#0f1218";
+  const card = "#121722";
+  const grid = "#1e2633";
+  const text = "#e6edf7";
+  const sub = "#a9b4c6";
+  const track = "#2b3342";
+  const color1 = "#7c4dff";
 
   const marginX = 40;
   const listLeft = marginX + 12;
@@ -785,7 +855,7 @@ function kvkTopSVG(rows, meta = {}) {
 
   <rect width="${W}" height="${H}" fill="${panel}"/>
   <g>
-    <rect x="20" y="20" width="${W-40}" height="${H-40}" rx="22" fill="${card}" stroke="${grid}" stroke-width="1"/>
+    <rect x="20" y="20" width="${W - 40}" height="${H - 40}" rx="22" fill="${card}" stroke="${grid}" stroke-width="1"/>
 
     <text x="${marginX}" y="70" class="b">${title}</text>
     <text x="${W - marginX}" y="98" class="s" text-anchor="end">${sublineR}</text>
@@ -805,12 +875,14 @@ async function renderKvkTopPNG(rows, meta) {
 const imgCache = new Map(); // key -> { buf, t }
 
 function cacheKeyPlayer(pid, bundle) {
-  return `p:${pid}:` +
+  return (
+    `p:${pid}:` +
     `${bundle.progress.dkpDone}|` +
     `${bundle.progress.killsDone}|` +
     `${bundle.progress.deadDone}|` +
     `${bundle.progress.killsLeft}|` +
-    `${bundle.latest.updated_at ?? ""}`;
+    `${bundle.latest.updated_at ?? ""}`
+  );
 }
 
 function cacheKeyTop(limit, activeId, rows) {
@@ -845,12 +917,12 @@ const client = new Client({
   ],
 });
 
-/* ───────────── helpers ───────────── */
+/* ───────────── helpers (Discord flow) ───────────── */
 
 async function getLinkedPlayerIdOrReply(msg) {
   const linked = await fetchLink(msg.author.id);
   if (!linked) {
-    await msg.reply("Спочатку зв’яжи себе: `!link <player_id>`");
+    await msg.reply('Link your account first: `!link <player_id>`');
     return null;
   }
   return linked;
@@ -879,12 +951,10 @@ client.on("messageCreate", async (msg) => {
         .catch(() => null);
       if (allowedChannel) {
         return void msg.reply(
-          `⚠️ Цей бот доступний тільки в ${allowedChannel}.`
+          `⚠️ Please use this bot in ${allowedChannel} only.`
         );
       } else {
-        return void msg.reply(
-          "⚠️ Цей бот доступний тільки в визначеному каналі."
-        );
+        return void msg.reply("⚠️ This bot is restricted to a specific channel.");
       }
     }
 
@@ -892,21 +962,22 @@ client.on("messageCreate", async (msg) => {
     const [cmd, ...args] = msg.content.slice(1).trim().split(/\s+/);
     log.info({ ...baseCtx(msg), cmd, args });
 
-    /* ===== ПУБЛІЧНІ КОМАНДИ ===== */
+    /* ===== PUBLIC COMMANDS ===== */
 
+    // !stats <player_id>
     if (cmd === "stats") {
       const idArg = args[0];
       if (!idArg || !/^\d+$/.test(idArg)) {
-        return void msg.reply("Використання: `!stats <player_id>`");
+        return void msg.reply("Usage: `!stats <player_id>`");
       }
 
       const cd = checkCooldown(msg.author.id);
-      if (cd) return void msg.reply(`Повільніше. Повтори через ${cd}s.`);
+      if (cd) return void msg.reply(`Slow down. Try again in ${cd}s.`);
 
       const latest = await fetchLatestById(idArg);
       if (!latest) {
         return void msg.reply(
-          "Ще нема даних. Треба прогнати сканер по цьому гравцю."
+          "No data yet. Ask an admin to scan this player."
         );
       }
 
@@ -931,16 +1002,17 @@ client.on("messageCreate", async (msg) => {
       return;
     }
 
+    // !me
     if (cmd === "me") {
       const linked = await getLinkedPlayerIdOrReply(msg);
       if (!linked) return;
 
       const cd = checkCooldown(msg.author.id);
-      if (cd) return void msg.reply(`Повільніше. Повтори через ${cd}s.`);
+      if (cd) return void msg.reply(`Slow down. Try again in ${cd}s.`);
 
       const latest = await fetchLatestById(linked);
       if (!latest) {
-        return void msg.reply("Поки що немає даних по твоєму player_id.");
+        return void msg.reply("No data yet for your player_id.");
       }
 
       const bundle = await buildZoneBasedKvkBundle(BigInt(linked), latest);
@@ -964,15 +1036,14 @@ client.on("messageCreate", async (msg) => {
       return;
     }
 
+    // !link <player_id> OR !link @user <player_id> (admin can link others)
     if (cmd === "link") {
-      // !link <player_id>
-      // або !link @user <player_id> (для адміна)
       const mention = msg.mentions.users.first() ?? msg.author;
       const idArg = mention === msg.author ? args[0] : args[1];
 
       if (!idArg || !/^\d+$/.test(idArg)) {
         return void msg.reply(
-          "Використання: `!link <player_id>` або `!link @user <player_id>` (для адміна)"
+          "Usage: `!link <player_id>` or `!link @user <player_id>` (admin only for others)"
         );
       }
 
@@ -982,76 +1053,77 @@ client.on("messageCreate", async (msg) => {
       );
       if (!rows.length) {
         return void msg.reply(
-          `player_id **${idArg}** поки не в базі. Нехай адмін проганяє сканер.`
+          `player_id **${idArg}** is not in the DB yet. Ask an admin to scan first.`
         );
       }
 
       if (!isAdmin(msg) && mention.id !== msg.author.id) {
         return void msg.reply(
-          "Ти можеш лінкати тільки себе. Інших може лінкати тільки адмін."
+          "You can only link yourself. Linking others requires admin."
         );
       }
 
       await setLink(mention.id, idArg);
       return void msg.reply(
-        `Зв’язано ${mention} ⇄ player_id **${idArg}**.`
+        `Linked ${mention} ↔ player_id **${idArg}**.`
       );
     }
 
+    // !unlink [@user]
     if (cmd === "unlink") {
       const mention = msg.mentions.users.first() ?? msg.author;
 
       if (!isAdmin(msg) && mention.id !== msg.author.id) {
         return void msg.reply(
-          "Ти можеш розлінкувати тільки себе. Інших — тільки адмін."
+          "You can only unlink yourself. Unlinking others requires admin."
         );
       }
 
       const playerId = await fetchLink(mention.id);
       if (!playerId) {
-        return void msg.reply(`${mention} ще не прив'язаний.`);
+        return void msg.reply(`${mention} is not linked.`);
       }
 
       await removeLink(mention.id);
       return void msg.reply(
-        `Відв’язано ${mention} ⇄ player_id **${playerId}**.`
+        `Unlinked ${mention} ↔ player_id **${playerId}**.`
       );
     }
 
     if (cmd === "help") {
       const HELP_PUBLIC = [
-        "**Публічні команди:**",
-        "`!stats <player_id>` — картка гравця (Kills T4+T5 / Dead прогрес у KvK)",
-        "`!me` — твоя картка (після `!link`)",
-        "`!link <player_id>` — прив’язати свій Discord до player_id",
-        "`!unlink` — відв’язати",
-        "`!help` — ця допомога",
+        "**Public commands:**",
+        "`!stats <player_id>` — Player card (KvK progress: T4+T5 Kills / Dead / DKP).",
+        "`!me` — Your card (after \`!link\`).",
+        "`!link <player_id>` — Link your Discord to your player_id.",
+        "`!unlink` — Unlink yourself.",
+        "`!help` — This help.",
       ].join("\n");
       return void msg.reply(HELP_PUBLIC);
     }
 
     if (cmd === "helpadmin") {
-      if (!isAdmin(msg)) return void msg.reply("Тільки адміни.");
+      if (!isAdmin(msg)) return void msg.reply("Admins only.");
       const HELP_ADMIN = [
-        "**Команди адміна:**",
-        "`!link @user <player_id>` — прив’язати згаданого юзера",
-        "`!unlink [@user]` — відв’язати",
-        "`!kvk start [name]` — створити новий KvK період",
-        "`!kvk active` — показати активний KvK`",
-        "`!kvk weight show` — показати ваги DKP (kills_weight для Kills(T4+T5), dead_to_kills для Dead)`",
-        "`!kvk weight <dead|kills> <value>` — оновити вагу DKP`",
-        "`!kvk ensure <player_id>` / \`!kvk ensure_all\` — згенерити goal_kills / goal_dead / goal_dkp для гравців`",
-        "`!kvk stats <player_id>` / \`!kvk me\` — картка прогресу KvK (Kills T4+T5 / Dead / DKP)`",
-        "`!kvk top [N] [text]` — топ по % DKP до цілі (PNG або text)`",
-        "`!top [kp|power] [N]` — топ по snapshot (KP = Kill Points total)`",
+        "**Admin commands:**",
+        "`!link @user <player_id>` — Link mentioned user.",
+        "`!unlink [@user]` — Unlink mentioned user.",
+        "`!kvk start [name]` — Start a new KvK period.",
+        "`!kvk active` — Show active KvK period ID.",
+        "`!kvk weight show` — Show DKP weights (kills_weight for Kills(T4+T5), dead_to_kills for Dead).",
+        "`!kvk weight <dead|kills> <value>` — Update DKP weight.",
+        "`!kvk ensure <player_id>` / \`!kvk ensure_all\` — Create goals (goal_kills, goal_dead, goal_dkp).",
+        "`!kvk stats <player_id>` / \`!kvk me\` — Player KvK progress card.",
+        "`!kvk top [N] [text]` — KvK leaderboard by % of DKP goal.",
+        "`!top [kp|power] [N]` — Simple snapshot leaderboard.",
       ].join("\n");
       return void msg.reply(HELP_ADMIN);
     }
 
-    /* ===== далі тільки адміни ===== */
+    /* ===== ADMIN-ONLY COMMANDS BELOW ===== */
     if (!isAdmin(msg)) {
       return void msg.reply(
-        "Тільки адміни. Публічно є: `!stats`, `!me`, `!link`, `!unlink`, `!help`."
+        "Admins only. Public commands are: `!stats`, `!me`, `!link`, `!unlink`, `!help`."
       );
     }
 
@@ -1061,7 +1133,7 @@ client.on("messageCreate", async (msg) => {
       const name = args.slice(1).join(" ") || null;
       const id = await kvkStart(name);
       return void msg.reply(
-        `Період **${id}** стартував${name ? `: ${name}` : ""}.`
+        `KvK period **${id}** started${name ? `: ${name}` : ""}.`
       );
     }
 
@@ -1069,15 +1141,15 @@ client.on("messageCreate", async (msg) => {
     if (cmd === "kvk" && args[0] === "active") {
       const id = await kvkActiveId();
       return void msg.reply(
-        id ? `Активний період: **${id}**` : "Активного періоду нема."
+        id ? `Active KvK period: **${id}**` : "No active KvK period."
       );
     }
 
-    // !kvk weight show  /  !kvk weight <dead|kills> <value>
+    // !kvk weight show / !kvk weight <dead|kills> <value>
     if (cmd === "kvk" && args[0] === "weight") {
       if ((args[1] || "").toLowerCase() === "show") {
         const id = await kvkActiveId();
-        if (!id) return void msg.reply("Активного періоду нема.");
+        if (!id) return void msg.reply("No active KvK period.");
         const { rows } = await pool.query(
           `SELECT kills_weight, dead_to_kills
              FROM kvk_config
@@ -1086,47 +1158,40 @@ client.on("messageCreate", async (msg) => {
         );
         if (!rows[0]) {
           return void msg.reply(
-            "Нема запису ваг для активного періоду."
+            "No weight config found for the active period."
           );
         }
         const { kills_weight, dead_to_kills } = rows[0];
         return void msg.reply(
-          `Ваги DKP → Kills(T4+T5): **${kills_weight}**, Dead: **${dead_to_kills}**`
+          `DKP Weights → Kills(T4+T5): **${kills_weight}**, Dead: **${dead_to_kills}**`
         );
       }
 
       const which = (args[1] || "").toLowerCase();
       const val = Number(args[2]);
-      if (
-        !["dead", "kills"].includes(which) ||
-        !Number.isFinite(val)
-      ) {
+      if (!["dead", "kills"].includes(which) || !Number.isFinite(val)) {
         return void msg.reply(
-          "Використання: `!kvk weight <dead|kills> <value>` або `!kvk weight show`"
+          "Usage: `!kvk weight <dead|kills> <value>` or `!kvk weight show`"
         );
       }
       await kvkSetWeight(which, val);
-      return void msg.reply(
-        `Вага **${which}** оновлена на **${val}**.`
-      );
+      return void msg.reply(`Weight **${which}** updated to **${val}**.`);
     }
 
     // !kvk ensure <player_id>
     if (cmd === "kvk" && (args[0] === "ensure" || args[0] === "setgoal")) {
       const pid = parsePlayerId(args[1]);
       if (pid == null)
-        return void msg.reply(
-          "Використання: `!kvk ensure <player_id>`"
-        );
+        return void msg.reply("Usage: `!kvk ensure <player_id>`");
 
       const g = await kvkEnsureGoal(pid);
       if (!g)
         return void msg.reply(
-          "Гол вже існує, або нема активного KvK / нема latest у гравця."
+          "Goal already exists, OR no active KvK, OR no latest snapshot for that player."
         );
 
       return void msg.reply(
-        `Goal для **${pid}** → Kills(T4+T5) ${nf(
+        `Goal for **${pid}** → Kills(T4+T5) ${nf(
           g.goal_kills
         )} • Dead ${nf(g.goal_dead)} • DKP ${nf(g.goal_dkp)}`
       );
@@ -1144,13 +1209,13 @@ client.on("messageCreate", async (msg) => {
           const out = await kvkEnsureGoal(BigInt(r.player_id));
           if (out) made++;
           else skipped++;
-          await new Promise(res => setTimeout(res, 8));
+          await new Promise((res) => setTimeout(res, 8));
         } catch {
           skipped++;
         }
       }
       return void msg.reply(
-        `Голи виставлені: **${made}** (пропущено: ${skipped}).`
+        `Goals created: **${made}** (skipped: ${skipped}).`
       );
     }
 
@@ -1158,19 +1223,14 @@ client.on("messageCreate", async (msg) => {
     if (cmd === "kvk" && args[0] === "stats") {
       const pid = parsePlayerId(args[1]);
       if (pid == null)
-        return void msg.reply(
-          "Використання: `!kvk stats <player_id>`"
-        );
+        return void msg.reply("Usage: `!kvk stats <player_id>`");
 
       const cd = checkCooldown(msg.author.id);
-      if (cd)
-        return void msg.reply(`Повільніше. Повтори через ${cd}s.`);
+      if (cd) return void msg.reply(`Slow down. Try again in ${cd}s.`);
 
       const latest = await fetchLatestById(pid);
       if (!latest)
-        return void msg.reply(
-          "Нема latest по цьому гравцю."
-        );
+        return void msg.reply("No latest snapshot for that player.");
 
       const bundle = await buildZoneBasedKvkBundle(pid, latest);
 
@@ -1200,14 +1260,11 @@ client.on("messageCreate", async (msg) => {
       if (!linked) return;
 
       const cd = checkCooldown(msg.author.id);
-      if (cd)
-        return void msg.reply(`Повільніше. Повтори через ${cd}s.`);
+      if (cd) return void msg.reply(`Slow down. Try again in ${cd}s.`);
 
       const latest = await fetchLatestById(linked);
       if (!latest)
-        return void msg.reply(
-          "Нема latest по твоєму player_id."
-        );
+        return void msg.reply("No latest snapshot for your player_id.");
 
       const bundle = await buildZoneBasedKvkBundle(BigInt(linked), latest);
 
@@ -1231,14 +1288,11 @@ client.on("messageCreate", async (msg) => {
         Math.max(parseInt(args[1] || "10", 10) || 10, 1),
         50
       );
-      const asText =
-        (args[2] || "").toLowerCase() === "text";
+      const asText = (args[2] || "").toLowerCase() === "text";
 
       const rows = await kvkTop(limit);
       if (!rows.length)
-        return void msg.reply(
-          "Пусто. (Може ще немає goals?)"
-        );
+        return void msg.reply("Empty. (Maybe no goals yet?)");
 
       if (asText) {
         const lines = rows.map(
@@ -1250,10 +1304,14 @@ client.on("messageCreate", async (msg) => {
         return void msg.reply(lines.join("\n"));
       }
 
+      // timestamp from the players actually in this list
+      const ts = await fetchMaxUpdatedAtForPlayers(
+        rows.map((r) => r.player_id).filter(Boolean)
+      );
       const meta = {
         title: `KvK Top ${rows.length}`,
         active: (await kvkActiveId()) ?? "–",
-        updated: new Date().toLocaleString(),
+        updated: formatTs(ts),
       };
 
       const key = cacheKeyTop(limit, meta.active, rows);
@@ -1272,7 +1330,7 @@ client.on("messageCreate", async (msg) => {
 
     // !top [kp|power] [N]
     if (cmd === "top") {
-      const by = (args[0] || "kp").toLowerCase(); // kp або power
+      const by = (args[0] || "kp").toLowerCase(); // kp or power
       const limit = Math.min(
         Math.max(parseInt(args[1] || "10", 10) || 10, 1),
         50
@@ -1281,7 +1339,7 @@ client.on("messageCreate", async (msg) => {
       const rows = await fetchTop(by, limit);
       if (!rows.length)
         return void msg.reply(
-          "Пусто. Спочатку треба прогнати сканер."
+          "Empty. You need to run the scanner first."
         );
 
       const lines = rows.map(
@@ -1293,20 +1351,23 @@ client.on("messageCreate", async (msg) => {
       return void msg.reply(lines.join("\n"));
     }
 
+    // fallback
     return void msg.reply(
-      "Невідома команда. Подивись `!help` або `!helpadmin`."
+      "Unknown command. See `!help` or `!helpadmin`."
     );
   } catch (e) {
+    // Quiet catch: don't spam the channel with an error message.
+    // We just log, and (optionally) send to LOG_CHANNEL_ID for admins.
     log.error({ err: String(e?.stack || e), where: "messageCreate" });
-    try {
-      await msg.reply("⚠️ Сталася помилка. Поклич адміна.");
-    } catch {}
+
     if (LOG_CHANNEL_ID) {
       const ch = client.channels.cache.get(LOG_CHANNEL_ID);
       if (ch?.isTextBased?.()) {
         ch
           .send(
-            `⚠️ Error: \`${String(e?.message || e)}\``
+            `⚠️ Error for message "${msg.content}": \`${String(
+              e?.message || e
+            )}\``
           )
           .catch(() => {});
       }
@@ -1334,8 +1395,6 @@ for (const sig of ["SIGINT", "SIGTERM", "SIGQUIT"]) {
 }
 
 if (!process.env.DISCORD_TOKEN || !process.env.DATABASE_URL) {
-  console.error(
-    "❌ DISCORD_TOKEN або DATABASE_URL відсутній в .env"
-  );
+  console.error("❌ DISCORD_TOKEN or DATABASE_URL missing in .env");
 }
 client.login(process.env.DISCORD_TOKEN);
