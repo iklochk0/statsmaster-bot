@@ -85,31 +85,36 @@ function computeGoalsForFarm() {
   };
 }
 
-// DKP формула 50/50
-// goal_dkp = goal_kills + goal_dead
-// killsDone => дає частку killsFrac, яка покриває до 50% DKP
-// deadDone  => дає deadFrac, яка покриває до 50% DKP
-function computeDkpProgress(killsDone, deadDone, goalKills, goalDead) {
-  const gKills = toNum(goalKills, 0);
-  const gDead  = toNum(goalDead, 0);
-  const goal_dkp = gKills + gDead;
+  // формула DKP
+  // - pctRaw = середнє між (killsDone/goalKills) і (deadDone/goalDead), в %
+  // - dkpDone / goal_dkp: просто "ігрові очки", де 100% = 100,000
+  function computeDkpProgress(killsDone, deadDone, goalKills, goalDead) {
+    const gKills = toNum(goalKills, 0);
+    const gDead  = toNum(goalDead, 0);
 
-  const killsFrac = gKills > 0 ? killsDone / gKills : 0;
-  const deadFrac  = gDead  > 0 ? deadDone  / gDead  : 0;
+    const killsFrac = gKills > 0 ? killsDone / gKills : 0;
+    const deadFrac  = gDead  > 0 ? deadDone  / gDead  : 0;
 
-  const dkpDone =
-    0.5 * goal_dkp * killsFrac +
-    0.5 * goal_dkp * deadFrac;
+    // наш реальний прогрес у %:
+    // якщо kills=ціль і dead=ціль → killsFrac=1, deadFrac=1
+    // (1 + 1)/2 * 100 = 100%
+    //
+    // якщо ти оверкапиш, наприклад deadFrac=2 то воно може піти за 100%
+    const pctRaw = ((killsFrac + deadFrac) / 2) * 100;
 
-  const pct =
-    goal_dkp > 0 ? (dkpDone / goal_dkp) * 100 : 0;
+    // шкала для красивих чисел на картці
+    // 100% прогресу = 100,000 DKP points
+    const DKP_CAP = 100_000;
 
-  return {
-    goal_dkp,
-    dkpDone,
-    pct,
-  };
-}
+    // скільки ти вже заробив цих DKP points
+    const dkpDoneDisplay = Math.round((pctRaw / 100) * DKP_CAP);
+
+    return {
+      goal_dkp: DKP_CAP,        // це те що ми показуємо як "праву цифру" під баром
+      dkpDone: dkpDoneDisplay,  // це те що ми показуємо як "ліву цифру"
+      pct: pctRaw,              // це для % зверху і для довжини бару
+    };
+  }
 
 /* ───────────────── schema init ───────────────── */
 
