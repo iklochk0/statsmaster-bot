@@ -367,6 +367,7 @@ function playerCardSVG(bundle) {
   const dT4    = renderDelta(deltas.t4);
 
   // побудова барів прогресу
+  // doneVal / goalVal -> pctRaw
   function progressPieces(done, goal, totalW) {
     if (!goal || goal <= 0) {
       return { wBase: 0, wOver: 0, pctRaw: 0 };
@@ -382,6 +383,7 @@ function playerCardSVG(bundle) {
     };
   }
 
+  // універсальний рендер одного бара
   function makeBar(labelText, doneVal, goalVal, offsetY) {
     const { wBase, wOver, pctRaw } = progressPieces(doneVal, goalVal, barW);
     return `
@@ -475,12 +477,27 @@ function playerCardSVG(bundle) {
     `;
   }
 
+  // бейдж справа зверху
   const badgePct = progress.pct || 0;
   const badgeTag = autoTag(badgePct);
 
-  // Підготовка даних для DKP бару з масштабом
-  const visDkpDone = progress.dkpDone * DKP_VISUAL_SCALE;
-  const visDkpGoal = goals.dkp       * DKP_VISUAL_SCALE;
+  // ==== DKP (10k score view) =====================================
+  //
+  // progress.pct  = DKP% (0..∞ теоретично)
+  // Ми хочемо, щоб в барі DKP підпис був "current / 10,000"
+  // де current ~ progress.pct % від 10,000.
+  //
+  // Формула:
+  //   visDkpGoal = 10000
+  //   visDkpDone = round( (progress.pct / 100) * 10000 )
+  //
+  // Напр. pct = 2%
+  // visDkpDone ~ 200 з 10000
+  //
+  const visDkpGoal = 10000;
+  const visDkpDone = Math.round(
+    (Number(progress.pct || 0) / 100) * visDkpGoal
+  );
 
   // основні бари:
   // main -> Kills, Dead, DKP
@@ -506,6 +523,7 @@ function playerCardSVG(bundle) {
       goals.dead,
       barGapY
     );
+    // DKP bar використовує наші 10к-очки
     barsSvg += makeBar(
       "DKP",
       visDkpDone,
