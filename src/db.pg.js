@@ -85,33 +85,30 @@ function computeGoalsForFarm() {
   };
 }
 
-  // формула DKP
-  // - pctRaw = середнє між (killsDone/goalKills) і (deadDone/goalDead), в %
-  // - dkpDone / goal_dkp: просто "ігрові очки", де 100% = 100,000
+// DKP шкала: повністю виконав свої цілі = 10_000 DKP
+// kills і dead дають по 50% кожен
 function computeDkpProgress(killsDone, deadDone, goalKills, goalDead) {
   const gKills = toNum(goalKills, 0);
   const gDead  = toNum(goalDead, 0);
 
-  // наскільки виконані kill-цілі і dead-цілі окремо (може бути >1 якщо оверкап)
+  // частка виконання по кожній метриці (може бути >1 при оверкапі)
   const killsFrac = gKills > 0 ? killsDone / gKills : 0;
   const deadFrac  = gDead  > 0 ? deadDone  / gDead  : 0;
 
-  // наш загальний прогрес:
-  // kills дають 50%, dead дають 50%
-  // далі множимо на 100 щоб отримати у відсотках
-  const pctRaw = ((killsFrac + deadFrac) / 2) * 100;
+  // середнє 50/50
+  const avgFrac = (killsFrac + deadFrac) / 2; // 1.0 = виконав план на 100%
 
-  // DKP = просто цей же % але округлений до цілого
-  // (типу 2%, 87%, 140% => DKP 2, 87, 140)
-  const dkpNow = Math.round(pctRaw);
+  // DKP ми показуємо на красивій шкалі 0..10_000 (і вище, якщо оверкап)
+  const dkpGoal = 10_000;
+  const dkpNow  = Math.round(avgFrac * dkpGoal);
 
-  // goal_dkp = 100, бо "повністю закрив" = 100 DKP
-  const dkpGoal = 100;
+  // pct для бейджа зверху (відсоток)
+  const pctRaw = avgFrac * 100;
 
   return {
-    goal_dkp: dkpGoal,
-    dkpDone: dkpNow,
-    pct: pctRaw, // pctRaw лишаємо як є (float), бо картка показує badgePct як Math.round(pctRaw)
+    goal_dkp: dkpGoal,  // 10,000
+    dkpDone:  dkpNow,   // типу 237, 8750, 13200...
+    pct:      pctRaw,   // 0..∞%, використовується для бейджа і барів % текстом
   };
 }
 
