@@ -7,7 +7,7 @@
 //  - показує картку гравця (!stats / !me)
 //  - ранжує (!top, !kvk top)
 //  - !link / !unlink привʼязує Discord користувача до player_id
-//  - !farm mainId farmId -> створює заявку "це моя ферма"
+//  - !farm <mainId> <farmId> -> створює заявку "це моя ферма"
 //      -> бот кидає embed + кнопки в ADMIN_CHANNEL_ID
 //      -> адмін тисне Approve / Reject
 //      -> бот апдейтить account_links, перераховує цілі ферми як farm (dead=600k),
@@ -24,6 +24,12 @@
 //   - адміни можуть користуватись публічними командами в паблік-каналі
 //
 // Відсоток на картці = DKP % (50% kills + 50% dead проти їхніх цілей).
+//
+// DKP_VISUAL_SCALE:
+//   внутрішньо DKP це "до 100", але ми хочемо щоб на картинці було щось типу
+//   "690,815 / 29,000,000", а не "2.38 / 100".
+//   Тому ми множимо dkpDone і goal_dkp на великий коефіцієнт,
+//   чисто для виводу (UI), не для математики.
 //
 // Кеш: ми кешимо PNG, бо sharp не безкоштовний.
 //
@@ -92,6 +98,10 @@ const HEAVY_CMD_COOLDOWN_S = Number(process.env.HEAVY_CMD_COOLDOWN_S || 4);
 
 const LOG_LEVEL = (process.env.LOG_LEVEL || "info").toLowerCase();
 const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
+
+// Наскільки пафосно показувати DKP на картці / в топі.
+// 290_000 дає цифри типу "690,815 / 29,000,000" при goal=100 внутрішніх DKP.
+const DKP_VISUAL_SCALE = 290_000;
 
 /* ───────────────── логер ───────────────── */
 
@@ -468,6 +478,10 @@ function playerCardSVG(bundle) {
   const badgePct = progress.pct || 0;
   const badgeTag = autoTag(badgePct);
 
+  // Підготовка даних для DKP бару з масштабом
+  const visDkpDone = progress.dkpDone * DKP_VISUAL_SCALE;
+  const visDkpGoal = goals.dkp       * DKP_VISUAL_SCALE;
+
   // основні бари:
   // main -> Kills, Dead, DKP
   // farm -> тільки Dead
@@ -494,8 +508,8 @@ function playerCardSVG(bundle) {
     );
     barsSvg += makeBar(
       "DKP",
-      progress.dkpDone,
-      goals.dkp,
+      visDkpDone,
+      visDkpGoal,
       barGapY * 2
     );
   }
@@ -848,7 +862,11 @@ function kvkTopSVG(rows, meta = {}) {
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;");
 
-    const bottomLeftText  = `${nfNum(r.dkpDone || 0)} / ${nfNum(r.goal_dkp || 0)}`;
+    // масштаб DKP для виводу
+    const visDkpDone = r.dkpDone   * DKP_VISUAL_SCALE;
+    const visDkpGoal = r.goal_dkp  * DKP_VISUAL_SCALE;
+
+    const bottomLeftText  = `${nfNum(visDkpDone || 0)} / ${nfNum(visDkpGoal || 0)}`;
     const bottomRightText = `${Math.round(pctRaw)}%`;
     const rankText = `${idx + 1}.`;
 
@@ -1427,12 +1445,13 @@ client.on("messageCreate", async (msg) => {
         }
 
         if (asText) {
-          const lines = rows.map(
-            (r, i) =>
-              `**${i + 1}.** ${r.name ?? r.player_id} — ${pct1(
-                r.pct
-              )}% (DKP ${nf(r.dkpDone)}/${nf(r.goal_dkp)})`
-          );
+          const lines = rows.map((r, i) => {
+            const visDkpDone = r.dkpDone  * DKP_VISUAL_SCALE;
+            const visDkpGoal = r.goal_dkp * DKP_VISUAL_SCALE;
+            return `**${i + 1}.** ${r.name ?? r.player_id} — ${pct1(
+              r.pct
+            )}% (DKP ${nf(visDkpDone)}/${nf(visDkpGoal)})`;
+          });
           return void msg.reply(lines.join("\n"));
         }
 

@@ -6,13 +6,33 @@
 // Приклад:
 //   node src/excelImport.js ./zone4_day1.xlsx zone4 true
 //
-// Що робить:
+// Що робить зараз (оновлено):
 //   - читає Excel (кожен рядок = внесок гравця за інтервал бою)
-//   - пушить ці дельти в таблицю imports
-//   - гарантує що гравець існує в players (створює "пустого" якщо не бачили через OCR)
-//   - оновлює name + last_update в players
+//   - ДЛЯ КОЖНОГО РЯДКА:
+//        * бере player_id
+//        * перевіряє чи такий player_id вже існує в players
+//          (тобто baseline вже був завантажений через OCR або руками)
+//        * якщо НЕ існує -> скіпаємо цей рядок повністю
+//          (НЕ створюємо пустого гравця, НЕ вставляємо imports)
+//        * якщо існує:
+//              - оновлюємо name,last_update в players
+//              - вставляємо дельту в imports
+//   - збирає короткий звіт і шле його у адмін вебхук (ADMIN_IMPORT_WEBHOOK_URL)
 //
-// Після імпорту шле звіт у #individual-stats-admin через webhook.
+// ВАЖЛИВО:
+//   Тепер імпорт не "засирає" базу новими айдішками з Excel.
+//   Тільки ті, кого ми вже бачили (і маємо baseline в players), отримують апдейт.
+//
+// Колонки Excel які ми їмо:
+//   "Character ID" / "Governor ID" / "ID" / "Id" / "id"           -> player_id
+//   "Username" / "Name" / "Governor Name" / "name"                -> name
+//   "Power"                                                       -> ΔPower  (може бути від'ємне)
+//   "Total Kill Points"                                          -> ΔKP
+//   "Deaths" / "Dead" / "Deaths Count"                            -> ΔDead
+//   "T4 Kills" / "T4"                                            -> ΔT4
+//   "T5 Kills" / "T5"                                            -> ΔT5
+//
+// is_scoring=true означає, що це бойові очки (впливають на прогрес / % / DKP).
 //
 
 import "dotenv/config";
@@ -24,13 +44,15 @@ import {
   getActiveKvK,
 } from "./db.pg.js";
 
+/* ───────── helpers ───────── */
+
 function parseNum(v) {
   if (v === null || v === undefined) return null;
   if (typeof v === "number") return v;
   const s = String(v)
     .trim()
-    .replace(/[, ]+/g, "")
-    .replace(/[^\d.-]/g, "");
+    .replace(/[, ]+/g, "")      // прибираємо пробіли й коми "1 234 567" -> "1234567"
+    .replace(/[^\d.-]/g, "");   // залишаємо тільки цифри, мінус, крапку
   if (!s) return null;
   const n = Number(s);
   return Number.isFinite(n) ? n : null;
@@ -46,15 +68,17 @@ function readExcelRows(path) {
   return rows;
 }
 
+/**
+ * Відправляє короткий звіт в адмін-канал через вебхук.
+ * Ми показуємо ТІЛЬКИ тих, кого реально імпортили (тобто тих, хто існував у players).
+ */
 async function sendWebhookSummary({ zoneTag, isScoring, kvk_id, importedRows }) {
-  // якщо в env нема вебхука — просто скіпаємо
   const hook = process.env.ADMIN_IMPORT_WEBHOOK_URL;
-  if (!hook) return;
+  if (!hook) return; // немає вебхука - просто промовчали
 
-  // трохи статистики для повідомлення
   const totalPlayers = importedRows.length;
 
-  // топ-10 по dead і t4+t5 просто щоб одразу бачити хто топився / різав
+  // топ-10 по (killsT45 + dead) чисто для швидкого перегляду кого треба відмітити
   const preview = [...importedRows]
     .sort((a, b) => (b.dead + b.t4 + b.t5) - (a.dead + a.t4 + a.t5))
     .slice(0, 10)
@@ -73,7 +97,7 @@ async function sendWebhookSummary({ zoneTag, isScoring, kvk_id, importedRows }) 
     `KvK: ${kvk_id}`,
     `Zone: ${zoneTag}`,
     `Scoring: ${isScoring ? "yes" : "no"}`,
-    `Rows imported: ${totalPlayers}`,
+    `Imported players: ${totalPlayers}`,
     ``,
     `Top contributors (killsT4+T5 + dead):`,
     preview || "(no rows)",
@@ -89,6 +113,8 @@ async function sendWebhookSummary({ zoneTag, isScoring, kvk_id, importedRows }) 
     console.error("⚠️ Failed to send webhook summary:", err);
   }
 }
+
+/* ───────── main ───────── */
 
 async function main() {
   const [, , filePath, zoneTagArg, scoringArg] = process.argv;
@@ -116,14 +142,14 @@ async function main() {
   const client = await pool.connect();
   const importTs = new Date();
 
-  // зберемо підсумок по кожному рядку, щоб відправити в вебхук
+  // зберемо тільки тих, кого реально імпортили (для webhook)
   const importedPreview = [];
 
   try {
     await client.query("BEGIN");
 
     for (const row of excelRows) {
-      // спробувати дістати player_id
+      // 1. Витягуємо player_id з різних назв колонок
       const pidRaw =
         row["Character ID"] ??
         row["Governor ID"] ??
@@ -132,10 +158,22 @@ async function main() {
         row["id"];
 
       if (!pidRaw) continue;
-
-      const pidStr = String(pidRaw).replace(/\D/g, "");
+      const pidStr = String(pidRaw).replace(/\D/g, ""); // тільки цифри
       if (!pidStr) continue;
 
+      // 2. Перевіряємо що цей player_id вже існує в players
+      //    (інакше скіпаємо, бо ти не хочеш автододавати нових)
+      const { rows: chkRows } = await client.query(
+        `SELECT 1 FROM players WHERE player_id=$1`,
+        [pidStr]
+      );
+      const existsAlready = chkRows.length > 0;
+      if (!existsAlready) {
+        // цей челик не має baseline → пропускаємо взагалі
+        continue;
+      }
+
+      // 3. Читаємо ім'я
       const nameRaw =
         row["Username"] ??
         row["Name"] ??
@@ -143,9 +181,12 @@ async function main() {
         row["name"] ??
         "";
 
-      // ДЕЛЬТИ з Excel за період:
+      // 4. Дельти з Excel (за останній інтервал)
+      //    Power може бути від'ємним (мінус техніка і т.д.)
       const dPower = parseNum(row["Power"]) ?? 0;
+
       const dKP    = parseNum(row["Total Kill Points"]) ?? 0;
+
       const dDead  =
         parseNum(row["Deaths"]) ??
         parseNum(row["Dead"]) ??
@@ -162,24 +203,13 @@ async function main() {
         parseNum(row["T5"]) ??
         0;
 
-      // гарантуємо існування гравця в players
-      // baseline ми НЕ змінюємо (0,0,0...), просто апсертимо рядок і апдейтимо only name,last_update
+      // 5. Оновлюємо players: просто ім'я + last_update (НЕ baseline цифри!)
       await client.query(
         `
-        INSERT INTO players (
-          player_id,
-          name,
-          power_current,
-          kp_current,
-          dead_current,
-          t4_kills_current,
-          t5_kills_current,
-          last_update
-        )
-        VALUES ($1,$2,0,0,0,0,0, now())
-        ON CONFLICT (player_id) DO UPDATE SET
-          name        = EXCLUDED.name,
-          last_update = now()
+        UPDATE players
+           SET name = $2,
+               last_update = now()
+         WHERE player_id = $1
         `,
         [
           pidStr,
@@ -187,7 +217,7 @@ async function main() {
         ]
       );
 
-      // кинули дельту в imports
+      // 6. Вставляємо дельту в imports
       await client.query(
         `
         INSERT INTO imports (
@@ -218,20 +248,23 @@ async function main() {
         ]
       );
 
+      // 7. Для webhook статистики
       importedPreview.push({
         player_id: pidStr,
         name: String(nameRaw || "").trim(),
-        t4: Math.trunc(dT4) || 0,
-        t5: Math.trunc(dT5) || 0,
+        t4:   Math.trunc(dT4)   || 0,
+        t5:   Math.trunc(dT5)   || 0,
         dead: Math.trunc(dDead) || 0,
       });
     }
 
     await client.query("COMMIT");
+
     console.log(
       `✅ Import OK. zone_tag="${zoneTag}", is_scoring=${isScoring}, kvk_id=${kvk_id}`
     );
 
+    // надсилаємо summary в адмінський вебхук (якщо налаштовано)
     await sendWebhookSummary({
       zoneTag,
       isScoring,
