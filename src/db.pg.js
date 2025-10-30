@@ -85,36 +85,32 @@ function computeGoalsForFarm() {
   };
 }
 
-  // формула DKP
-  // - pctRaw = середнє між (killsDone/goalKills) і (deadDone/goalDead), в %
-  // - dkpDone / goal_dkp: просто "ігрові очки", де 100% = 100,000
-  function computeDkpProgress(killsDone, deadDone, goalKills, goalDead) {
-    const gKills = toNum(goalKills, 0);
-    const gDead  = toNum(goalDead, 0);
+// DKP шкала: повністю виконав свої цілі = 10_000 DKP
+// kills і dead дають по 50% кожен
+function computeDkpProgress(killsDone, deadDone, goalKills, goalDead) {
+  const gKills = toNum(goalKills, 0);
+  const gDead  = toNum(goalDead, 0);
 
-    const killsFrac = gKills > 0 ? killsDone / gKills : 0;
-    const deadFrac  = gDead  > 0 ? deadDone  / gDead  : 0;
+  // частка виконання по кожній метриці (може бути >1 при оверкапі)
+  const killsFrac = gKills > 0 ? killsDone / gKills : 0;
+  const deadFrac  = gDead  > 0 ? deadDone  / gDead  : 0;
 
-    // наш реальний прогрес у %:
-    // якщо kills=ціль і dead=ціль → killsFrac=1, deadFrac=1
-    // (1 + 1)/2 * 100 = 100%
-    //
-    // якщо ти оверкапиш, наприклад deadFrac=2 то воно може піти за 100%
-    const pctRaw = ((killsFrac + deadFrac) / 2) * 100;
+  // середнє 50/50
+  const avgFrac = (killsFrac + deadFrac) / 2; // 1.0 = виконав план на 100%
 
-    // шкала для красивих чисел на картці
-    // 100% прогресу = 100,000 DKP points
-    const DKP_CAP = 100_000;
+  // DKP ми показуємо на красивій шкалі 0..10_000 (і вище, якщо оверкап)
+  const dkpGoal = 10_000;
+  const dkpNow  = Math.round(avgFrac * dkpGoal);
 
-    // скільки ти вже заробив цих DKP points
-    const dkpDoneDisplay = Math.round((pctRaw / 100) * DKP_CAP);
+  // pct для бейджа зверху (відсоток)
+  const pctRaw = avgFrac * 100;
 
-    return {
-      goal_dkp: DKP_CAP,        // це те що ми показуємо як "праву цифру" під баром
-      dkpDone: dkpDoneDisplay,  // це те що ми показуємо як "ліву цифру"
-      pct: pctRaw,              // це для % зверху і для довжини бару
-    };
-  }
+  return {
+    goal_dkp: dkpGoal,  // 10,000
+    dkpDone:  dkpNow,   // типу 237, 8750, 13200...
+    pct:      pctRaw,   // 0..∞%, використовується для бейджа і барів % текстом
+  };
+}
 
 /* ───────────────── schema init ───────────────── */
 
