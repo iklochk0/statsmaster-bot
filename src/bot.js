@@ -1622,4 +1622,4 @@ if (!process.env.DISCORD_TOKEN || !process.env.DATABASE_URL) {
   console.error("❌ DISCORD_TOKEN or DATABASE_URL missing in .env");
 }
 
-client.login(process.env.DISCORD_TOKEN);
+client.login(process.env.DISCORD_TOKEN); 
