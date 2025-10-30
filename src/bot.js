@@ -5,7 +5,7 @@
 // ЦЯ ВЕРСІЯ:
 //  - працює з новою моделлю БД (kvk_sessions / kvk_goals / imports / account_links).
 //  - показує картку гравця (!stats / !me)
-//  - ранжує (!top, !kvk top)
+//  - ранжує (!top  — це колишній !kvk top, DKP%)
 //  - !link / !unlink привʼязує Discord користувача до player_id
 //  - !farm <mainId> <farmId> -> створює заявку "це моя ферма"
 //      -> бот кидає embed + кнопки в ADMIN_CHANNEL_ID
@@ -20,14 +20,14 @@
 //
 // Правила:
 //   - звичайні команди можна писати в PUBLIC_CHANNEL_ID
-//   - адмінські штуки типу approve farm / !kvk start робимо в ADMIN_CHANNEL_ID
+//   - адмінські штуки типу approve farm / !kvk start / !top робимо в ADMIN_CHANNEL_ID
 //   - адміни можуть користуватись публічними командами в паблік-каналі
 //
 // Відсоток на картці = DKP % (50% kills + 50% dead проти їхніх цілей).
 //
 // DKP_VISUAL_SCALE:
 //   внутрішньо DKP це "до 100", але ми хочемо щоб на картинці було щось типу
-//   "690,815 / 29,000,000", а не "2.38 / 100".
+//   "690,815 / 10,000" повсюди де показується DKP.
 //   Тому ми множимо dkpDone і goal_dkp на великий коефіцієнт,
 //   чисто для виводу (UI), не для математики.
 //
@@ -58,7 +58,6 @@ import {
   buildStatsCardData,
   buildTopListData,
   fetchPlayerSnapshot,
-  fetchTopSnapshot,
   fetchMaxUpdateFor,
   fetchPlayerBasic,
   recalcGoalsForRoleChange,
@@ -201,22 +200,6 @@ function checkCooldown(userId) {
   if (restMs > 0) return Math.ceil(restMs / 1000);
   lastHeavyUse.set(userId, now);
   return 0;
-}
-
-// обмеження імені в текстовому топі
-function trimName(s = "", max = 22) {
-  s = String(s || "");
-  return s.length > max ? s.slice(0, max - 1) + "…" : s;
-}
-
-// бейдж справа зверху картки
-function autoTag(pct) {
-  const v = Number(pct) || 0;
-  if (v >= 170) return "WHALE KILLER";
-  if (v >= 140) return "OVERDRIVE";
-  if (v >= 110) return "OVERCAP";
-  if (v >= 90)  return "ON TRACK";
-  return "WARM UP";
 }
 
 function channelAllowed(msg) {
@@ -762,7 +745,7 @@ async function renderPlayerCardPNG(bundle) {
   return buf;
 }
 
-/* ───────────────── KvK TOP SVG ─────────────────
+/* ───────────────── KvK TOP SVG (DKP) ─────────────────
    rows = buildTopListData(limit)
 */
 function hashTopRows(rows) {
@@ -889,7 +872,7 @@ function kvkTopSVG(rows, meta = {}) {
           x="${cardX + innerPadX + 40}"
           y="${yTop}"
           fill="${textCol}"
-          font-family="Inter, system-ui"
+          font-family="Inter, system-ui}
           font-size="20"
           font-weight="600"
         >
@@ -1150,7 +1133,6 @@ client.on("messageCreate", async (msg) => {
         "`!me` — Your card (after `!link`).",
         "`!link <player_id>` — Link your Discord to your player_id.",
         "`!unlink` — Unlink yourself.",
-        "`!top [kp|power] [N]` — Snapshot leaderboard.",
         "`!farm <main_id> <farm_id>` — Ask admins to mark an account as your farm.",
         "`!help` — This help.",
       ].join("\n");
@@ -1301,30 +1283,7 @@ client.on("messageCreate", async (msg) => {
       );
     }
 
-    // !top [kp|power] [N]
-    // це чисто snapshot baseline по power_current / kp_current
-    if (cmd === "top") {
-      const by = (args[0] || "kp").toLowerCase(); // "kp" або "power"
-      const limit = Math.min(
-        Math.max(parseInt(args[1] || "10", 10) || 10, 1),
-        50
-      );
-
-      const rows = await fetchTopSnapshot(by, limit);
-      if (!rows.length) {
-        return void msg.reply(
-          "Empty. You need to import or scan players first."
-        );
-      }
-
-      const lines = rows.map(
-        (r, i) =>
-          `**${i + 1}.** ${trimName(r.name ?? r.player_id)} — ${by.toUpperCase()}: **${nf(
-            r.metric
-          )}**`
-      );
-      return void msg.reply(lines.join("\n"));
-    }
+    // УВАГА: старий публічний !top (KP/Power snapshot) — ВИДАЛЕНО
 
     // !farm <main_player_id> <farm_player_id>
     // юзер просить: "ось це моя ферма"
@@ -1392,7 +1351,7 @@ client.on("messageCreate", async (msg) => {
         "**Admin commands:**",
         "`!helpadmin` — this list.",
         "`!kvk start [name]` — start new KvK session (admin channel only).",
-        "`!kvk top [N] [text]` — KvK leaderboard (DKP%).",
+        "`!top [N] [text]` — KvK leaderboard (DKP%).",
         "`!link @user <player_id>` — Link mentioned user to player.",
         "`!unlink [@user]` — Unlink mentioned user.",
         "Farm approvals happen via buttons in admin channel.",
@@ -1404,8 +1363,57 @@ client.on("messageCreate", async (msg) => {
 
     if (!isAdmin(msg)) {
       return void msg.reply(
-        "Admins only. Public commands are: `!stats`, `!me`, `!link`, `!unlink`, `!top`, `!farm`, `!help`."
+        "Admins only. Public commands are: `!stats`, `!me`, `!link`, `!unlink`, `!farm`, `!help`."
       );
+    }
+
+    // НОВЕ: !top  (DKP leaderboard; це колишній !kvk top)
+    if (cmd === "top") {
+      const limit = Math.min(
+        Math.max(parseInt(args[0] || "10", 10) || 10, 1),
+        50
+      );
+      const asText = (args[1] || "").toLowerCase() === "text";
+
+      const rows = await buildTopListData(limit);
+      if (!rows.length) {
+        return void msg.reply(
+          "Empty. (Maybe no goals / no active KvK?)"
+        );
+      }
+
+      if (asText) {
+        const lines = rows.map((r, i) => {
+          const visDkpDone = r.dkpDone  * DKP_VISUAL_SCALE;
+          const visDkpGoal = r.goal_dkp * DKP_VISUAL_SCALE;
+          return `**${i + 1}.** ${r.name ?? r.player_id} — ${pct1(
+            r.pct
+          )}% (DKP ${nf(visDkpDone)}/${nf(visDkpGoal)})`;
+        });
+        return void msg.reply(lines.join("\n"));
+      }
+
+      // timestamp для header "Updated:"
+      const ts = await fetchMaxUpdateFor(
+        rows.map((r) => r.player_id).filter(Boolean)
+      );
+      const meta = {
+        title: `KvK Top ${rows.length}`,
+        updated: formatTs(ts),
+      };
+
+      const cacheKey = `top:${limit}:${hashTopRows(rows)}`;
+      let png = getCached(cacheKey);
+      if (!png) {
+        png = await renderKvkTopPNG(rows, meta);
+        setCached(cacheKey, png);
+      }
+
+      const file = new AttachmentBuilder(png, {
+        name: "kvk_top.png",
+      });
+      await msg.reply({ files: [file] });
+      return;
     }
 
     // !kvk ...
@@ -1429,58 +1437,9 @@ client.on("messageCreate", async (msg) => {
         );
       }
 
-      // !kvk top [N] [text]
-      if (sub === "top") {
-        const limit = Math.min(
-          Math.max(parseInt(args[1] || "10", 10) || 10, 1),
-          50
-        );
-        const asText = (args[2] || "").toLowerCase() === "text";
-
-        const rows = await buildTopListData(limit);
-        if (!rows.length) {
-          return void msg.reply(
-            "Empty. (Maybe no goals / no active KvK?)"
-          );
-        }
-
-        if (asText) {
-          const lines = rows.map((r, i) => {
-            const visDkpDone = r.dkpDone  * DKP_VISUAL_SCALE;
-            const visDkpGoal = r.goal_dkp * DKP_VISUAL_SCALE;
-            return `**${i + 1}.** ${r.name ?? r.player_id} — ${pct1(
-              r.pct
-            )}% (DKP ${nf(visDkpDone)}/${nf(visDkpGoal)})`;
-          });
-          return void msg.reply(lines.join("\n"));
-        }
-
-        // timestamp для header "Updated:"
-        const ts = await fetchMaxUpdateFor(
-          rows.map((r) => r.player_id).filter(Boolean)
-        );
-        const meta = {
-          title: `KvK Top ${rows.length}`,
-          updated: formatTs(ts),
-        };
-
-        const cacheKey = `top:${limit}:${hashTopRows(rows)}`;
-        let png = getCached(cacheKey);
-        if (!png) {
-          png = await renderKvkTopPNG(rows, meta);
-          setCached(cacheKey, png);
-        }
-
-        const file = new AttachmentBuilder(png, {
-          name: "kvk_top.png",
-        });
-        await msg.reply({ files: [file] });
-        return;
-      }
-
-      // якщо !kvk але не top/start
+      // (колишній `!kvk top` — видалено)
       return void msg.reply(
-        "Usage: `!kvk start [name]` or `!kvk top [N] [text]`"
+        "Usage: `!kvk start [name]`"
       );
     }
 

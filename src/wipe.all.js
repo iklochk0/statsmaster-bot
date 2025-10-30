@@ -27,7 +27,10 @@ const OBJECTS = [
   "runs",
   "stats",
   "zone_scans",
-  "zone_snapshots"
+  "zone_snapshots",
+  "account_links",
+  "imports",
+  "kvk_sessions",
 ];
 
 const SQL = `
