@@ -281,6 +281,14 @@ function playerCardSVG(bundle) {
     farms,
   } = bundle;
 
+  const safe = (s) =>
+    String(s ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+
   const nfNum = (n) =>
     (n === null || n === undefined)
       ? "0"
@@ -299,7 +307,7 @@ function playerCardSVG(bundle) {
 
   // Геометрія
   const w = 1100;
-  const h = 760;
+  let h = 760;
   const padX   = 24;
   const padTop = 40;
 
@@ -311,8 +319,14 @@ function playerCardSVG(bundle) {
   const barGapY    = 80;
   const barsStartY = metricsY + 100;
 
-  const farmsStartY = barsStartY + (barGapY * 3) + 40;
-  const bottomYBase = farmsStartY + 120;
+  // Скільки барів: main = 3 (Kills, Dead, DKP), farm = 1 (Dead)
+  const numBars = (player.role === "farm") ? 1 : 3;
+
+  // Позиція блоку ферм (якщо будуть)
+  const farmsStartY = barsStartY + (barGapY * numBars) + 40;
+
+  // Базова Y-позиція для нижніх блоків (LEFT TO GO / LAST FIGHTS)
+  let bottomYBase = barsStartY + (barGapY * numBars) + 40;
 
   const leftBoxW   = 500;
   const leftBoxH   = 70;
@@ -350,7 +364,6 @@ function playerCardSVG(bundle) {
   const dT4    = renderDelta(deltas.t4);
 
   // побудова барів прогресу
-  // doneVal / goalVal -> pctRaw
   function progressPieces(done, goal, totalW) {
     if (!goal || goal <= 0) {
       return { wBase: 0, wOver: 0, pctRaw: 0 };
@@ -371,7 +384,7 @@ function playerCardSVG(bundle) {
     const { wBase, wOver, pctRaw } = progressPieces(doneVal, goalVal, barW);
     return `
       <g transform="translate(0,${offsetY})">
-        <text class="barLabel" x="0" y="-8">${labelText}</text>
+        <text class="barLabel" x="0" y="-8">${safe(labelText)}</text>
 
         <rect x="0" y="0"
               width="${barW}" height="${barH}" rx="4"
@@ -420,7 +433,7 @@ function playerCardSVG(bundle) {
     return `
       <g transform="translate(0,${offsetY})">
         <text class="barLabel" x="0" y="-8">
-          ${farm.name} (${farm.player_id})
+          ${safe(farm.name)} (${safe(farm.player_id)})
         </text>
 
         <rect x="0" y="0"
@@ -460,36 +473,22 @@ function playerCardSVG(bundle) {
     `;
   }
 
-  // бейдж справа зверху
+  // бейдж справа зверху (інлайн «автотег» без окремого файлу)
   const badgePct = Number(progress.pct || 0);
   const badgeTag =
     badgePct >= 200 ? "WHALE KILLER" :
     badgePct >= 120 ? "AHEAD" :
     badgePct >= 100 ? "ON TRACK" :
     badgePct >=  70 ? "KEEP PUSHING" :
-                    "WARM UP";
+                      "WARM UP";
 
-  // ==== DKP (10k score view) =====================================
-  //
-  // progress.pct  = DKP% (0..∞ теоретично)
-  // Ми хочемо, щоб в барі DKP підпис був "current / 10,000"
-  // де current ~ progress.pct % від 10,000.
-  //
-  // Формула:
-  //   visDkpGoal = 10000
-  //   visDkpDone = round( (progress.pct / 100) * 10000 )
-  //
-  // Напр. pct = 2%
-  // visDkpDone ~ 200 з 10000
-  //
+  // ==== DKP (10k score view)
   const visDkpGoal = 10000;
   const visDkpDone = Math.round(
     (Number(progress.pct || 0) / 100) * visDkpGoal
   );
 
-  // основні бари:
-  // main -> Kills, Dead, DKP
-  // farm -> тільки Dead
+  // основні бари
   let barsSvg = "";
   if (player.role === "farm") {
     barsSvg += makeBar(
@@ -511,7 +510,6 @@ function playerCardSVG(bundle) {
       goals.dead,
       barGapY
     );
-    // DKP bar використовує наші 10к-очки
     barsSvg += makeBar(
       "DKP",
       visDkpDone,
@@ -525,43 +523,13 @@ function playerCardSVG(bundle) {
     ? `Dead ${nfNum(progress.deadLeft)}`
     : `Kills ${nfNum(progress.killsLeft)} • Dead ${nfNum(progress.deadLeft)}`;
 
-  // LAST FIGHTS BOX
-  const hasLastFightData =
-    lastFight &&
-    lastFight.zoneName &&
-    ((lastFight.killsT45 || 0) > 0 ||
-     (lastFight.dead     || 0) > 0);
-
-  const lastFightBox = hasLastFightData
-    ? `
-      <g transform="translate(${padX + leftBoxW + 24}, ${bottomYBase})">
-        <text x="0" y="0"
-              font-family="Inter, system-ui"
-              font-size="14"
-              fill="${subCol}"
-              font-weight="500">
-          YOUR LAST FIGHTS AT "${lastFight.zoneName}" ZONE
-        </text>
-
-        <rect x="0" y="16"
-              width="${leftBoxW}" height="${leftBoxH}"
-              rx="${leftBoxR}"
-              fill="${panelBg}"/>
-
-        <text x="16" y="52"
-              font-family="Inter, system-ui"
-              font-size="18"
-              fill="${textCol}"
-              font-weight="500">
-          Kills ${nfNum(lastFight.killsT45)} • Dead ${nfNum(lastFight.dead)}
-        </text>
-      </g>
-    `
-    : "";
-
   // "My Farms"
   let farmsSvg = "";
-  if (player.role === "main" && farms && farms.farms && farms.farms.length) {
+  const farmCount = (player.role === "main" && farms && Array.isArray(farms.farms))
+    ? farms.farms.length
+    : 0;
+
+  if (farmCount > 0) {
     let farmBars = "";
     let yOff = 0;
     for (const fm of farms.farms) {
@@ -584,7 +552,46 @@ function playerCardSVG(bundle) {
         </g>
       </g>
     `;
+
+    // Якщо є ≥1 ферми — зсуваємо нижні блоки під ферми
+    bottomYBase = farmsStartY + farmCount * barGapY + 40;
   }
+
+  // Загальна висота полотна — під нижні блоки (LEFT TO GO / LAST FIGHTS)
+  h = Math.max(h, bottomYBase + leftBoxH + 60);
+
+  // LAST FIGHTS BOX (праворуч від LEFT TO GO)
+  const hasLastFightData =
+    lastFight &&
+    lastFight.zoneName &&
+    ((lastFight.killsT45 || 0) > 0 || (lastFight.dead || 0) > 0);
+
+  const lastFightBox = hasLastFightData
+    ? `
+      <g transform="translate(${padX + leftBoxW + 24}, ${bottomYBase})">
+        <text x="0" y="0"
+              font-family="Inter, system-ui"
+              font-size="14"
+              fill="${subCol}"
+              font-weight="500">
+          YOUR LAST FIGHTS AT "${safe(lastFight.zoneName)}" ZONE
+        </text>
+
+        <rect x="0" y="16"
+              width="${leftBoxW}" height="${leftBoxH}"
+              rx="${leftBoxR}"
+              fill="${panelBg}"/>
+
+        <text x="16" y="52"
+              font-family="Inter, system-ui"
+              font-size="18"
+              fill="${textCol}"
+              font-weight="500">
+          Kills ${nfNum(lastFight.killsT45)} • Dead ${nfNum(lastFight.dead)}
+        </text>
+      </g>
+    `
+    : "";
 
   return `
 <svg xmlns="http://www.w3.org/2000/svg"
@@ -642,15 +649,15 @@ function playerCardSVG(bundle) {
   <!-- Header -->
   <g transform="translate(${padX},${padTop})">
     <text class="title">
-      ${player.name} (${player.player_id})
+      ${safe(player.name)} (${safe(player.player_id)})
     </text>
 
     <text y="28" class="sub">
-      Updated: ${updatedAtStr}
+      Updated: ${safe(updatedAtStr)}
     </text>
 
     <text y="48" class="sub">
-      Zone Tag: ${zone.tag || "-"}
+      Zone Tag: ${safe(zone?.tag || "-")}
     </text>
   </g>
 
@@ -671,7 +678,7 @@ function playerCardSVG(bundle) {
       font-weight="600"
       font-family="Inter, system-ui"
       letter-spacing="0.08em">
-      ${badgeTag}
+      ${safe(badgeTag)}
     </text>
   </g>
 
@@ -749,12 +756,11 @@ function playerCardSVG(bundle) {
           font-size="18"
           fill="${textCol}"
           font-weight="500">
-      ${leftToGoText}
+      ${safe(leftToGoText)}
     </text>
   </g>
 
   ${lastFightBox}
-
   ${farmsSvg}
 
 </svg>
@@ -812,8 +818,7 @@ function kvkTopSVG(rows, meta = {}) {
     headerH + gapAfterH + rows.length * rowGap + bottomPad;
   const H = outerMargin * 2 + cardInnerHeight;
 
-  const nfNum = (n) =>
-    Number(n ?? 0).toLocaleString("en-US");
+  const nfNum = (n) => Number(n ?? 0).toLocaleString("en-US");
 
   // Updated:
   let updatedAtStr = meta.updated || "";
@@ -842,12 +847,9 @@ function kvkTopSVG(rows, meta = {}) {
 
   function barPieces(pctRawNum) {
     const raw = Number(pctRawNum) || 0;
-
     const capped = Math.max(0, Math.min(raw, 200)); // візуальний ліміт
-
     const basePct = Math.min(capped, 100);
     const overPct = Math.max(Math.min(capped - 100, 100), 0);
-
     return {
       pctRaw: raw,
       wBase: (barW * basePct) / 100,
@@ -866,13 +868,14 @@ function kvkTopSVG(rows, meta = {}) {
 
     const safeName = playerName
       .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;");
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;");
 
-    // масштаб DKP для виводу
-    const visDkpDone = r.dkpDone   * DKP_VISUAL_SCALE;
-    const visDkpGoal = r.goal_dkp  * DKP_VISUAL_SCALE;
+    // ✅ DKP у шкалі 10 000 (узгоджено з playerCardSVG)
+    const visDkpGoal = 10000;
+    const visDkpDone = Math.round(((Number(r.pct) || 0) / 100) * visDkpGoal);
 
-    const bottomLeftText  = `${nfNum(visDkpDone || 0)} / ${nfNum(visDkpGoal || 0)}`;
+    const bottomLeftText  = `${nfNum(visDkpDone)} / ${nfNum(visDkpGoal)}`;
     const bottomRightText = `${Math.round(pctRaw)}%`;
     const rankText = `${idx + 1}.`;
 
@@ -941,7 +944,7 @@ function kvkTopSVG(rows, meta = {}) {
             : ""
         }
 
-        <!-- підпис зліва -->
+        <!-- DKP підпис зліва -->
         <text
           x="${cardX + innerPadX + 40}"
           y="${yTop + 16 + barH + 20}"
@@ -1476,8 +1479,8 @@ client.on("messageCreate", async (msg) => {
 
       if (asText) {
         const lines = rows.map((r, i) => {
-          const visDkpDone = r.dkpDone  * DKP_VISUAL_SCALE;
-          const visDkpGoal = r.goal_dkp * DKP_VISUAL_SCALE;
+        const visDkpGoal = 10000;
+        const visDkpDone = Math.round(((Number(r.pct) || 0) / 100) * visDkpGoal);
           return `**${i + 1}.** ${r.name ?? r.player_id} — ${pct1(
             r.pct
           )}% (DKP ${nf(visDkpDone)}/${nf(visDkpGoal)})`;
