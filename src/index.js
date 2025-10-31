@@ -101,8 +101,8 @@ const SCAN_PAUSE_MAX_MS = Number(process.env.SCAN_PAUSE_MAX_MS || 2000);
 
 const RAND_PX = Number(process.env.RAND_PX || 0);
 
-// базовий індекс рядка, який ми регулярно тицяємо (5-й по дефолту)
-const BASE_ROW_IDX = Number(process.env.BASE_ROW_IDX ?? 4);
+// БАЗОВИЙ ІНДЕКС (sticky): 4-й видимий рядок → 0-based = 3
+const BASE_ROW_IDX = Number(process.env.BASE_ROW_IDX ?? 3);
 
 // "людські відпочинки"
 const IDLE_EVERY_MIN = Number(process.env.IDLE_EVERY_MIN || 3);
@@ -114,6 +114,9 @@ const FAKE_SWIPE_DY = Number(process.env.FAKE_SWIPE_DY || 140);
 const FAKE_SWIPE_COUNT = Number(process.env.FAKE_SWIPE_COUNT || 1);
 const FAKE_SWIPE_DUR = Number(process.env.FAKE_SWIPE_DUR || 380);
 const FAKE_SWIPE_PROB = Number(process.env.FAKE_SWIPE_PROB || 0.3);
+
+// Ймовірність використати KEYCODE_BACK для закриття саме оверлею Dead
+const P_BACK_IN_DEATH = Number(process.env.P_BACK_IN_DEATH ?? 0.35);
 
 /* ──────────────────────── CLI args ──────────────────────── */
 
@@ -250,8 +253,8 @@ function pickPointInRect(rect) {
 
 async function fakeSwipeInDead() {
   for (let i = 0; i < FAKE_SWIPE_COUNT; i++) {
-    const x0 = SAFE.left + SAFE.width / 2 + randInt(-20, 20);
-    const y0 = SAFE.top + SAFE.height / 2 + randInt(40, 80);
+    const x0 = SAFE.left + SAFE.width / 2 + randInt(-30, 30);
+    const y0 = SAFE.top + SAFE.height / 2 + randInt(20, 100);
 
     await adbSwipe(
       x0,
@@ -262,7 +265,7 @@ async function fakeSwipeInDead() {
       { i }
     );
 
-    await sleepLog(300 + randInt(0, 250), "after fake swipe");
+    await sleepLog(400 + randInt(0, 250), "after fake swipe");
   }
 }
 
@@ -360,6 +363,44 @@ function levelRectForRow(i) {
     safeBottom - height
   );
   return { left, top, width, height };
+}
+
+function rankRectForRow(i) {
+  const col = LIST.rankCol;
+  if (!col?.left || !col?.width || !col?.height)
+    throw new Error("ui.cityHallList.rankCol missing left/width/height");
+
+  const { left, width, height } = col;
+  const safeTop = SAFE.top;
+  const safeBottom = SAFE.top + SAFE.height;
+
+  // який рядок відповідає top0 (за замовчуванням 0-й)
+  const refIdx = Number.isFinite(col.refRowIndex) ? col.refRowIndex : 0;
+
+  let top;
+  if (Number.isFinite(col.top0)) {
+    // ВАЖЛИВО: прив’язуємось до rowRefY(refIdx), а не до rowRefY(0)
+    const dy = rowRefY(i) - rowRefY(refIdx);
+    top = clamp(Math.round(col.top0 + dy), safeTop, safeBottom - height);
+  } else {
+    const off = Array.isArray(col.topOffset)
+      ? col.topOffset[i] ?? 0
+      : col.topOffset ?? 0;
+    const centerY = rowRefY(i);
+    top = clamp(Math.round(centerY + off - height / 2), safeTop, safeBottom - height);
+  }
+  return { left, top, width, height };
+}
+
+async function readRankAtRow(i) {
+  await captureScreen(SCREEN_PATH);
+  const rect = rankRectForRow(i);
+  const outDir = path.join(ROOT_DIR, "screenshots", "ch_ranks");
+  const piece = await cropRegions(SCREEN_PATH, { rank: rect }, outDir);
+  const raw = piece.rank ? (await ocrBuffer(piece.rank, "0123456789")).trim() : "";
+  const n = Number((raw || "").replace(/\D/g, ""));
+  logAction("ocrRank", { row: i, rect, raw, parsed: n });
+  return Number.isFinite(n) ? n : NaN;
 }
 
 async function readLevelAtRow(i) {
@@ -572,7 +613,7 @@ async function copyNameIntoTexts(texts) {
   }
 
   // пауза між двома тапами
-  await sleepLog(randMs(500, 1100), "between name taps");
+  await sleepLog(randMs(100, 1500), "between name taps");
 
   // тап #2
   if (clickAction) {
@@ -743,23 +784,115 @@ async function isCityHallList() {
 
 /* ──────────────────────── назад у список ──────────────────────── */
 
-async function backToCityHallList() {
-  // подвійний тап по "закрити death"
-  logAction("back", { step: "closeDeath#1" });
-  await navigateHuman(FLOW.closeDeath);
+const EXPECT_ALIGN_MAX_STEPS = Number(process.env.EXPECT_ALIGN_MAX_STEPS || 40);
 
-  await sleepLog(randMs(500, 1100), "between closeDeath taps");
+async function alignBaseRowToExpectedRank(expectedRank) {
+  if (!Number.isInteger(expectedRank) || expectedRank < 1) return false;
 
-  logAction("back", { step: "closeDeath#2" });
-  await navigateHuman(FLOW.closeDeath);
+  let steps = 0, miss = 0;
+  const MAX = EXPECT_ALIGN_MAX_STEPS;
 
-  await sleepLog(T_SETTLE, "after closeDeath double tap");
+  // перше читання
+  let current = await readRankAtRow(BASE_ROW_IDX);
+  if (!Number.isFinite(current)) {
+    await nudgeOneRowDown("align-prime");
+    current = await readRankAtRow(BASE_ROW_IDX);
+  }
 
-  // тепер сам профіль закрити
-  logAction("back", { step: "closeProfile" });
+  while (steps < MAX && Number.isFinite(current) && current !== expectedRank) {
+    const delta = expectedRank - current; // + → вниз (більші ранги), − → вгору
+
+    if (Math.abs(delta) >= 4) {
+      await coarseScrollRows(Math.min(10, Math.abs(delta)), "align-coarse");
+    } else if (delta > 0) {
+      await nudgeOneRowDown("align+");
+    } else {
+      await nudgeOneRowUp("align-");
+    }
+
+    steps++;
+    const next = await readRankAtRow(BASE_ROW_IDX);
+    if (!Number.isFinite(next)) {
+      if (++miss >= 2) break;        // двічі промазали OCR — виходимо
+      continue;                      // ще одна спроба вирівнятись
+    }
+    miss = 0;
+    current = next;
+  }
+
+  logAction("align-done", { expectedRank, got: current, steps });
+  return current === expectedRank;
+}
+
+// різниця Y між сусідніми рядками — для recovery-скролу
+const ROW_DY = Math.max(20, Math.round(Math.abs(rowRefY(1) - rowRefY(0))));
+
+async function nudgeOneRowDown(label="nudgeDown") {
+  // список вниз (до БІЛЬШИХ номерів місця)
+  const x = SAFE.left + Math.round(SAFE.width * 0.5);
+  const y1 = SAFE.top + Math.round(SAFE.height * 0.70);
+  const y2 = y1 - ROW_DY;
+  await adbSwipe(x, y1, x, y2, 240, { label }); // swipe up → list moves down
+  await sleepLog(160 + randInt(0,100), "after nudgeDown");
+}
+
+async function nudgeOneRowUp(label="nudgeUp") {
+  // список вгору (до МЕНШИХ номерів місця)
+  const x = SAFE.left + Math.round(SAFE.width * 0.5);
+  const y1 = SAFE.top + Math.round(SAFE.height * 0.30);
+  const y2 = y1 + ROW_DY;
+  await adbSwipe(x, y1, x, y2, 240, { label }); // swipe down → list moves up
+  await sleepLog(160 + randInt(0,100), "after nudgeUp");
+}
+
+async function coarseScrollRows(rows, label="coarse") {
+  // грубо докрутити на ~кілька рядів за раз (швидше при великому visited)
+  while (rows >= 5) {
+    const x = SAFE.left + Math.round(SAFE.width * 0.5);
+    const y1 = SAFE.top + Math.round(SAFE.height * 0.80);
+    const y2 = SAFE.top + Math.round(SAFE.height * 0.20);
+    await adbSwipe(x, y1, x, y2, 420, { label });
+    await sleepLog(220 + randInt(0,120), "after coarse swipe");
+    rows -= 5; // приблизно стільки «рядків» з’їдає довгий свайп
+  }
+  while (rows-- > 0) await nudgeOneRowDown(label+"-tail");
+}
+
+
+async function backToCityHallListSafe(visitedSoFar = 0) {
+  // 1) Закриваємо Dead-деталі: рівно ОДИН раз (X або Back на оверлеї)
+  const useBack = Math.random() < P_BACK_IN_DEATH;
+  if (useBack) {
+    logAction("back", { step: "closeDeath-BACK" });
+    await sendKeyevent(4);
+  } else {
+    logAction("back", { step: "closeDeath-X" });
+    await navigateHuman(FLOW.closeDeath);
+  }
+  await sleepLog(T_SETTLE, "after closeDeath");
+
+  // 2) Закриваємо сам профіль — тільки X (Back тут небезпечний)
+  logAction("back", { step: "closeProfile-X" });
   await navigateHuman(FLOW.closeProfile);
-
   await sleepLog(T_SETTLE, "after closeProfile");
+
+  // 3) Переконуємось, що ми у списку
+  if (!(await isCityHallList())) {
+    // Ми випадково закрили рейтинг → відновлюємось
+    logAction("recover", { why: "not-in-list" });
+    await openCityHallList();
+    await sleepLog(T_SETTLE + T_JITTER(), "after reopen list");
+
+    // 1) Грубо докручуємо за лічильником до приблизного місця
+    const approxRows = Math.max(0, visitedSoFar - BASE_ROW_IDX);
+    await coarseScrollRows(approxRows, "recover-coarse");
+
+    // 2) Точно вирівнюємось за OCR рангу у BASE_ROW_IDX
+    const expectedRank = visitedSoFar + 1;
+    await alignBaseRowToExpectedRank(expectedRank);
+  }
+
+  // 4) Без пост-нуджів: довіряємось “липкому” 4-му рядку.
   return true;
 }
 
@@ -857,7 +990,7 @@ async function main() {
   await openCityHallList();
   await humanPause();
 
-  // Етап 1: пройти верх списку до BASE_ROW_IDX-1
+  // Етап 1: пройти верх списку до BASE_ROW_IDX-1 (тобто 0,1,2)
   for (
     let i = 0;
     i < Math.min(BASE_ROW_IDX, LIST.rows.length) && visited < COUNT;
@@ -893,7 +1026,7 @@ async function main() {
       await appendBackup(backupPath, stamp);
     }
 
-    const ok = await backToCityHallList();
+    const ok = await backToCityHallListSafe(visited);
     if (!ok) {
       console.warn("   ! Can't return to list — stop");
       logAction("back-failed", {});
@@ -905,13 +1038,13 @@ async function main() {
     await maybeIdlePause();
   }
 
-  // Етап 2: "ферма" базового рядка (BASE_ROW_IDX) з fallback
+  // Етап 2: «липкий» BASE_ROW_IDX (3) з fallback на 4/5
   while (visited < COUNT) {
     await maybeIdlePause();
 
     const { opened, usedIndex } = await openProfileWithFallbacks(BASE_ROW_IDX);
     if (!opened) {
-      console.warn("   ! Ghost chain (5/6/7) — skip this slot");
+      console.warn("   ! Ghost chain (4/5/6) — skip this slot");
       logAction("ghost-chain-skip", {});
 
       visited++;
@@ -924,7 +1057,7 @@ async function main() {
       await appendBackup(backupPath, stamp);
     }
 
-    const ok = await backToCityHallList();
+    const ok = await backToCityHallListSafe(visited);
     if (!ok) {
       console.warn("   ! Can't return to list — stop");
       logAction("back-failed", {});

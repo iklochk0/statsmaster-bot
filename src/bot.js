@@ -1303,64 +1303,133 @@ client.on("messageCreate", async (msg) => {
 
     // УВАГА: старий публічний !top (KP/Power snapshot) — ВИДАЛЕНО
 
-    // !farm <main_player_id> <farm_player_id>
+    // !farm <farm_player_id>
     // юзер просить: "ось це моя ферма"
     if (cmd === "farm") {
-      const mainIdArg = args[0];
-      const farmIdArg = args[1];
+      // якщо один аргумент -> юзерський режим
+      if (args.length === 1) {
+        const farmIdArg = args[0];
 
-      if (!mainIdArg || !farmIdArg || !/^\d+$/.test(mainIdArg) || !/^\d+$/.test(farmIdArg)) {
-        return void msg.reply("Usage: `!farm <main_player_id> <farm_player_id>`");
-      }
+        // перевірка формату farm_id
+        if (!farmIdArg || !/^\d+$/.test(farmIdArg)) {
+          return void msg.reply("Usage: `!farm <farm_id>` after you `!link` your main.");
+        }
 
-      // гравці повинні існувати в players
-      const mainSnap = await fetchPlayerSnapshot(mainIdArg);
-      const farmSnap = await fetchPlayerSnapshot(farmIdArg);
+        // шукаємо його main через fetchLink()
+        const mainId = await fetchLink(msg.author.id);
+        if (!mainId) {
+          return void msg.reply("You must `!link <your_main_id>` first before adding a farm.");
+        }
 
-      if (!mainSnap) {
-        return void msg.reply(
-          `Main player_id **${mainIdArg}** not found in DB.`
-        );
-      }
-      if (!farmSnap) {
-        return void msg.reply(
-          `Farm player_id **${farmIdArg}** not found in DB.`
-        );
-      }
+        // фіксуємо що обидва існують у players
+        const mainSnap = await fetchPlayerSnapshot(mainId);
+        if (!mainSnap) {
+          return void msg.reply("Your linked main is not in DB yet. Ask admin to import you first.");
+        }
 
-      // спробуємо створити pending-заявку
-      let reqRow;
-      try {
-        reqRow = await createFarmLinkRequest(
-          mainIdArg,
-          farmIdArg,
+        const farmSnap = await fetchPlayerSnapshot(farmIdArg);
+        if (!farmSnap) {
+          return void msg.reply(`Farm player_id **${farmIdArg}** not found in DB.`);
+        }
+
+        // створити pending-заявку
+        let reqRow;
+        try {
+          reqRow = await createFarmLinkRequest(
+            mainId,           // owner_player_id
+            farmIdArg,        // farm_player_id
+            msg.author.id     // requested_by_discord_id
+          );
+        } catch (e) {
+          return void msg.reply(
+            "This farm is already linked or pending another request."
+          );
+        }
+
+        // надіслати embed з кнопками в адмін-канал
+        const posted = await sendFarmRequestEmbedToAdmins(
+          reqRow.request_id,
+          mainSnap,
+          farmSnap,
           msg.author.id
         );
-      } catch (e) {
-        // швидше за все UNIQUE(farm_player_id) поругався:
-        return void msg.reply(
-          "This farm is already linked or pending another request."
-        );
+
+        if (posted) {
+          return void msg.reply(
+            "Your farm link request was sent to admins for approval."
+          );
+        } else {
+          return void msg.reply(
+            "Request saved, but I couldn't post to admin channel. Admins will have to check manually."
+          );
+        }
       }
 
-      // шлемо в адмін-канал embed з кнопками
-      const posted = await sendFarmRequestEmbedToAdmins(
-        reqRow.request_id,
-        mainSnap,
-        farmSnap,
-        msg.author.id
+      // якщо два аргументи -> адмінський режим
+      if (args.length === 2) {
+        // тільки адміни можуть тут
+        if (!isAdmin(msg)) {
+          return void msg.reply("Only admins can do `!farm <main_id> <farm_id>`.");
+        }
+
+        const mainIdArg = args[0];
+        const farmIdArg = args[1];
+
+        if (!/^\d+$/.test(mainIdArg) || !/^\d+$/.test(farmIdArg)) {
+          return void msg.reply("Usage: `!farm <main_id> <farm_id>`");
+        }
+
+        const mainSnap = await fetchPlayerSnapshot(mainIdArg);
+        if (!mainSnap) {
+          return void msg.reply(
+            `Main player_id **${mainIdArg}** not found in DB.`
+          );
+        }
+
+        const farmSnap = await fetchPlayerSnapshot(farmIdArg);
+        if (!farmSnap) {
+          return void msg.reply(
+            `Farm player_id **${farmIdArg}** not found in DB.`
+          );
+        }
+
+        let reqRow;
+        try {
+          reqRow = await createFarmLinkRequest(
+            mainIdArg,
+            farmIdArg,
+            msg.author.id // адмін хто подав
+          );
+        } catch (e) {
+          return void msg.reply(
+            "This farm is already linked or pending another request."
+          );
+        }
+
+        const posted = await sendFarmRequestEmbedToAdmins(
+          reqRow.request_id,
+          mainSnap,
+          farmSnap,
+          msg.author.id
+        );
+
+        if (posted) {
+          return void msg.reply(
+            "Farm link request created and sent to admins (you)."
+          );
+        } else {
+          return void msg.reply(
+            "Request saved, but I couldn't post to admin channel."
+          );
+        }
+      }
+
+      // інакше (0 аргументів або >2)
+      return void msg.reply(
+        "Usage:\n- Player: `!farm <farm_id>` (your main must be linked with `!link`)\n- Admin: `!farm <main_id> <farm_id>`"
       );
-
-      if (posted) {
-        return void msg.reply(
-          "Your farm link request was sent to admins for approval."
-        );
-      } else {
-        return void msg.reply(
-          "Request saved, but I couldn't post to admin channel. Admins will have to check manually."
-        );
-      }
     }
+
 
     // !helpadmin (показує тільки адмінам)
     if (cmd === "helpadmin") {

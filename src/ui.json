@@ -25,6 +25,13 @@
       "width": 65,
       "height": 45,
       "top0": 210
+    },
+    "rankCol": {
+      "left": 145,
+      "width": 60,
+      "height": 50,
+      "top0": 205,
+      "refRowIndex": 0
     }
   }
 }
