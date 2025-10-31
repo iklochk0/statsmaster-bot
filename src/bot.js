@@ -461,8 +461,13 @@ function playerCardSVG(bundle) {
   }
 
   // бейдж справа зверху
-  const badgePct = progress.pct || 0;
-  const badgeTag = autoTag(badgePct);
+  const badgePct = Number(progress.pct || 0);
+  const badgeTag =
+    badgePct >= 200 ? "WHALE KILLER" :
+    badgePct >= 120 ? "AHEAD" :
+    badgePct >= 100 ? "ON TRACK" :
+    badgePct >=  70 ? "KEEP PUSHING" :
+                    "WARM UP";
 
   // ==== DKP (10k score view) =====================================
   //
@@ -890,7 +895,7 @@ function kvkTopSVG(rows, meta = {}) {
           x="${cardX + innerPadX + 40}"
           y="${yTop}"
           fill="${textCol}"
-          font-family="Inter, system-ui}
+          font-family="Inter, system-ui"
           font-size="20"
           font-weight="600"
         >
