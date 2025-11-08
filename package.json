@@ -23,6 +23,7 @@
     "clipboardy": "^4.0.0",
     "discord.js": "^14.21.0",
     "dotenv": "^17.2.1",
+    "exceljs": "^4.4.0",
     "execa": "^9.6.0",
     "express": "^5.1.0",
     "pg": "^8.16.3",
