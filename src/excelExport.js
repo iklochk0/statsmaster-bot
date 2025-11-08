@@ -2,7 +2,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import ExcelJS from "exceljs";
-import Archiver from "archiver";
+import archiver from "archiver";
 import { pool } from "./db.pg.js";
 
 /**
@@ -127,7 +127,7 @@ export async function exportFullBackup() {
     // Тимчасово кладемо JSON файли у пам’яті без диска
     await new Promise((resolve, reject) => {
       const output = fs.createWriteStream(zipPath);
-      const archive = Archiver("zip", { zlib: { level: 9 } });
+      const archive = archiver("zip", { zlib: { level: 9 } });
 
       output.on("close", resolve);
       archive.on("error", reject);
