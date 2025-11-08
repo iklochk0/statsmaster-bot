@@ -67,6 +67,8 @@ import {
   rejectFarmLink,
 } from "./db.pg.js";
 
+import { exportFullBackup } from "./exportBackup.js";
+
 /* ───────────────── healthcheck ───────────────── */
 
 const PORT = process.env.PORT || 3000;
@@ -1159,7 +1161,7 @@ client.on("messageCreate", async (msg) => {
         "`!me` — Your card (after `!link`).",
         "`!link <player_id>` — Link your Discord to your player_id.",
         "`!unlink` — Unlink yourself.",
-        "`!farm <main_id> <farm_id>` — Ask admins to mark an account as your farm.",
+        "`!farm <farm_id>` — Attach a farm (after `!link`).",
         "`!help` — This help.",
       ].join("\n");
       return void msg.reply(HELP_PUBLIC);
@@ -1508,6 +1510,36 @@ client.on("messageCreate", async (msg) => {
         name: "kvk_top.png",
       });
       await msg.reply({ files: [file] });
+      return;
+    }
+
+    // !backup
+    if (cmd === "backup") {
+      // тільки в адмін-каналі, щоб великі файли не сипались у публічний
+      if (msg.channel.id !== ADMIN_CHANNEL_ID) {
+        return void msg.reply("Run `!backup` in the admin channel.");
+      }
+
+      await msg.channel.send("⏳ Creating full backup (Excel + JSON zip)...");
+      try {
+        const { xlsxPath, zipPath } = await exportFullBackup();
+
+        const files = [];
+        try { files.push(new AttachmentBuilder(xlsxPath)); } catch {}
+        try { files.push(new AttachmentBuilder(zipPath)); } catch {}
+
+        if (files.length === 0) {
+          return void msg.reply("❌ Backup created, but files could not be attached (too large?). Check the server `/backups` folder.");
+        }
+
+        await msg.channel.send({
+          content: "✅ Backup ready:",
+          files
+        });
+      } catch (e) {
+        console.error("backup error:", e);
+        await msg.channel.send("❌ Backup failed: " + (e?.message || e));
+      }
       return;
     }
 
