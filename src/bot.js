@@ -1451,6 +1451,7 @@ client.on("messageCreate", async (msg) => {
         "`!top [N] [text]` — KvK leaderboard (DKP%).",
         "`!link @user <player_id>` — Link mentioned user to player.",
         "`!unlink [@user]` — Unlink mentioned user.",
+        "`!backup` — Make backup.",
         "Farm approvals happen via buttons in admin channel.",
       ].join("\n");
       return void msg.reply(HELP_ADMIN);
