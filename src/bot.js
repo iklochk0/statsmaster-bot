@@ -67,7 +67,7 @@ import {
   rejectFarmLink,
 } from "./db.pg.js";
 
-import { exportFullBackup } from "./exportBackup.js";
+import { exportFullBackup } from "./excelExport.js";
 
 /* ───────────────── healthcheck ───────────────── */
 
