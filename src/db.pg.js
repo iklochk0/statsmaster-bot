@@ -700,9 +700,16 @@ export async function buildTopListData(limit = 10) {
       p.name,
       p.last_update,
       g.goal_kills,
-      g.goal_dead
+      g.goal_dead,
+      COALESCE(SUM(i.t4_kills + i.t5_kills), 0) AS killsdone,
+      COALESCE(SUM(i.dead), 0)                 AS deaddone
     FROM kvk_goals g
-    JOIN players p ON p.player_id = g.player_id
+    JOIN players p
+      ON p.player_id = g.player_id
+    LEFT JOIN imports i
+      ON i.kvk_id = $1
+     AND i.player_id = g.player_id
+     AND i.is_scoring = true
     WHERE g.kvk_id = $1
       AND NOT EXISTS (
         SELECT 1
@@ -710,29 +717,16 @@ export async function buildTopListData(limit = 10) {
         WHERE al.farm_player_id = g.player_id
           AND al.status = 'approved'
       )
+    GROUP BY g.player_id, p.name, p.last_update, g.goal_kills, g.goal_dead
     `,
     [kvkStr]
   );
 
-  const out = [];
-
-  for (const r of baseRows) {
-    const pidStr = String(r.player_id);
-
+  const out = baseRows.map((r) => {
     // бойовий вклад (тільки scoring)
-    const { rows: progRows } = await pool.query(
-      `SELECT
-          COALESCE(SUM(t4_kills + t5_kills),0) AS killsdone,
-          COALESCE(SUM(dead),0)               AS deaddone
-       FROM imports
-       WHERE kvk_id=$1
-         AND player_id=$2
-         AND is_scoring=true`,
-      [kvkStr, pidStr]
-    );
 
-    const killsDone = toNum(progRows[0]?.killsdone, 0);
-    const deadDone  = toNum(progRows[0]?.deaddone, 0);
+    const killsDone = toNum(r.killsdone, 0);
+    const deadDone  = toNum(r.deaddone, 0);
 
     const goalKills = toNum(r.goal_kills, 0);
     const goalDead  = toNum(r.goal_dead, 0);
@@ -744,7 +738,7 @@ export async function buildTopListData(limit = 10) {
       goalDead
     );
 
-    out.push({
+    return {
       player_id: r.player_id,
       name: r.name,
       updated_at: r.last_update,
@@ -755,8 +749,8 @@ export async function buildTopListData(limit = 10) {
       deadDone,
       goal_kills: goalKills,
       goal_dead: goalDead,
-    });
-  }
+    };
+  });
 
   out.sort((a, b) => b.pct - a.pct);
 

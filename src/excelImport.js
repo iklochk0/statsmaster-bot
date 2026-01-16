@@ -38,7 +38,6 @@
 
 import "dotenv/config";
 import XLSX from "xlsx";
-import fetch from "node-fetch";
 import { createHash } from "crypto";
 import {
   pool,
@@ -371,9 +370,12 @@ async function main() {
   } finally {
     client.release();
   }
+
+  await pool.end().catch(() => {});
 }
 
 main().catch((e) => {
   console.error("FATAL:", e);
+  pool.end().catch(() => {});
   process.exit(1);
 });
