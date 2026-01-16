@@ -1472,7 +1472,7 @@ client.on("messageCreate", async (msg) => {
         Math.max(parseInt(args[0] || "10", 10) || 10, 1),
         50
       );
-      const asText = (args[1] || "").toLowerCase() === "text";
+      const asText = (args[argOffset + 1] || "").toLowerCase() === "text";
 
       const rows = await buildTopListData(limit);
       if (!rows.length) {
@@ -1480,79 +1480,6 @@ client.on("messageCreate", async (msg) => {
           "Empty. (Maybe no goals / no active KvK?)"
         );
       }
-
-    // НОВЕ: !topkills / !topk / !top kills / !top k
-    if (
-      cmd === "topkills" ||
-      cmd === "topk" ||
-      (cmd === "top" &&
-        (args[0]?.toLowerCase() === "kills" ||
-         args[0]?.toLowerCase() === "k"))
-    ) {
-      // якщо команда у форматі !top kills / !top k — пропускаємо перший аргумент
-      const offset =
-        cmd === "top" &&
-        (args[0]?.toLowerCase() === "kills" ||
-         args[0]?.toLowerCase() === "k")
-          ? 1
-          : 0;
-
-      const limit = Math.min(
-        Math.max(parseInt(args[offset] || "10", 10) || 10, 1),
-        50
-      );
-      const asText = (args[offset + 1] || "").toLowerCase() === "text";
-
-      const rows = await buildTopListData(limit);
-      if (!rows.length) {
-        return void msg.reply(
-          "Empty. (Maybe no goals / no active KvK?)"
-        );
-      }
-
-      // 👉 сортуємо по killsDone (T4+T5), спадання
-      rows.sort(
-        (a, b) =>
-          (Number(b.killsDone) || 0) - (Number(a.killsDone) || 0)
-      );
-
-      if (asText) {
-        const lines = rows.map((r, i) => {
-          const visDkpGoal = 10000;
-          const visDkpDone = Math.round(
-            ((Number(r.pct) || 0) / 100) * visDkpGoal
-          );
-          const kills = nf(Number(r.killsDone) || 0);
-
-          return `**${i + 1}.** ${r.name ?? r.player_id} — ${kills} kills (DKP ${pct1(
-            r.pct
-          )}% | ${nf(visDkpDone)}/${nf(visDkpGoal)})`;
-        });
-        return void msg.reply(lines.join("\n"));
-      }
-
-      const ts = await fetchMaxUpdateFor(
-        rows.map((r) => r.player_id).filter(Boolean)
-      );
-      const meta = {
-        title: `KvK Top ${rows.length} (by Kills)`,
-        updated: formatTs(ts),
-      };
-
-      const cacheKey = `topkills:${limit}:${hashTopRows(rows)}`;
-        let png = getCached(cacheKey);
-        if (!png) {
-          png = await renderKvkTopPNG(rows, meta);
-          setCached(cacheKey, png);
-        }
-
-        const file = new AttachmentBuilder(png, {
-          name: "kvk_top_kills.png",
-        });
-        await msg.reply({ files: [file] });
-        return;
-      }
-
 
       if (asText) {
         const lines = rows.map((r, i) => {
@@ -1584,6 +1511,67 @@ client.on("messageCreate", async (msg) => {
       const file = new AttachmentBuilder(png, {
         name: "kvk_top.png",
       });
+      await msg.reply({ files: [file] });
+      return;
+    }
+
+    // ===== NEW: !topkills / !top kills / !top k =====
+    const isTopKills =
+      cmd === "topkills" ||
+      (cmd === "top" && (args[0] || "").toLowerCase() === "kills") ||
+      (cmd === "top" && (args[0] || "").toLowerCase() === "k");
+
+    if (isTopKills) {
+      const argOffset = cmd === "top" ? 1 : 0;
+
+      // ---- limit ----
+      const rawLimitArg = args[argOffset];
+      const rawLimit = parseInt(rawLimitArg, 10);
+      const hasLimit = Number.isFinite(rawLimit);
+      const limit = Math.min(Math.max(hasLimit ? rawLimit : 10, 1), 50);
+
+      // ---- дані ----
+      const rows = await buildTopListData(limit);
+
+      // ---- сорт ----
+      rows.sort((a, b) => b.killsDone - a.killsDone);
+
+      // ---- text mode ----
+      const textArgIndex = argOffset + (hasLimit ? 1 : 0);
+      const asText = (args[textArgIndex] || "").toLowerCase() === "text";
+      if (asText) {
+        const lines = rows.map(
+          (r, i) =>
+            `**${i + 1}.** ${r.name ?? r.player_id} — ${r.killsDone.toLocaleString(
+              "en-US"
+            )} kills`
+        );
+        return void msg.reply(lines.join("\n"));
+      }
+
+      // ---- meta ----
+      const ts = await fetchMaxUpdateFor(
+        rows.map((r) => r.player_id).filter(Boolean)
+      );
+
+      const meta = {
+        title: `Top ${rows.length} by Kills`,
+        updated: formatTs(ts),
+        sortBy: "kills",
+      };
+
+      // ---- cache ----
+      const cacheKey =
+        `topkills:${limit}:` +
+        rows.map((r) => `${r.player_id}:${r.killsDone}`).join("|");
+
+      let png = getCached(cacheKey);
+      if (!png) {
+        png = await renderKvkTopPNG(rows, meta);
+        setCached(cacheKey, png);
+      }
+
+      const file = new AttachmentBuilder(png, { name: "topkills.png" });
       await msg.reply({ files: [file] });
       return;
     }
