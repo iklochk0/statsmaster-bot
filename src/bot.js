@@ -821,6 +821,13 @@ function kvkTopSVG(rows, meta = {}) {
   const H = outerMargin * 2 + cardInnerHeight;
 
   const nfNum = (n) => Number(n ?? 0).toLocaleString("en-US");
+  const isKillsView = meta.sortBy === "kills";
+  const pctNoRound = (v) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return "0";
+    const t = Math.trunc(n * 10) / 10;
+    return t.toLocaleString("en-US", { maximumFractionDigits: 1 });
+  };
 
   // Updated:
   let updatedAtStr = meta.updated || "";
@@ -862,7 +869,12 @@ function kvkTopSVG(rows, meta = {}) {
   let lines = "";
   rows.forEach((r, idx) => {
     const yTop = listTopY + idx * rowGap;
-    const { pctRaw, wBase, wOver } = barPieces(r.pct);
+    const killsDone = Number(r.killsDone) || 0;
+    const goalKills = Number(r.goal_kills) || 0;
+    const pctRaw = isKillsView
+      ? (goalKills > 0 ? (killsDone / goalKills) * 100 : 0)
+      : (Number(r.pct) || 0);
+    const { wBase, wOver } = barPieces(pctRaw);
 
     const playerName = (r.name && r.name.trim())
       ? r.name.trim()
@@ -877,8 +889,12 @@ function kvkTopSVG(rows, meta = {}) {
     const visDkpGoal = 10000;
     const visDkpDone = Math.round(((Number(r.pct) || 0) / 100) * visDkpGoal);
 
-    const bottomLeftText  = `${nfNum(visDkpDone)} / ${nfNum(visDkpGoal)}`;
-    const bottomRightText = `${Math.round(pctRaw)}%`;
+    const bottomLeftText = isKillsView
+      ? `Kills ${nfNum(killsDone)} / ${nfNum(goalKills)}`
+      : `${nfNum(visDkpDone)} / ${nfNum(visDkpGoal)}`;
+    const bottomRightText = isKillsView
+      ? `${pctNoRound(pctRaw)}%`
+      : `${Math.round(pctRaw)}%`;
     const rankText = `${idx + 1}.`;
 
     lines += `
