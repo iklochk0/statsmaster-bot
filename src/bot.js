@@ -480,9 +480,7 @@ function playerCardSVG(bundle) {
       text-anchor:middle;
     }
   </style>
-
-  <!-- Header -->
-  <g transform="translate(${padX},${padTop})">
+<g transform="translate(${padX},${padTop})">
     <text class="title">
       ${safe(player.name)} (${safe(player.player_id)})
     </text>
@@ -495,9 +493,7 @@ function playerCardSVG(bundle) {
       Zone Tag: ${safe(zone?.tag || "-")}
     </text>
   </g>
-
-  <!-- Badge -->
-  <g transform="translate(${w - padX - 10},0)" text-anchor="end">
+<g transform="translate(${w - padX - 10},0)" text-anchor="end">
     <text
       fill="${textCol}"
       font-size="40"
@@ -516,48 +512,36 @@ function playerCardSVG(bundle) {
       ${safe(badgeTag)}
     </text>
   </g>
-
-  <!-- TT-T -TT -->
-  <g transform="translate(${padX},${metricsY})">
-
-    <!-- Power -->
-    <g>
+<g transform="translate(${padX},${metricsY})">
+<g>
       <text class="metricH" x="0" y="0">Power</text>
       <text class="metricV" x="0" y="26">${nfNum(player.power)}</text>
       <text class="metricD" x="0" y="44" fill="${dPower.fill}">
         ${dPower.text}
       </text>
     </g>
-
-    <!-- Kill Points -->
-    <g transform="translate(${metricBlockGapX},0)">
+<g transform="translate(${metricBlockGapX},0)">
       <text class="metricH" x="0" y="0">Kill Points</text>
       <text class="metricV" x="0" y="26">${nfNum(player.kp)}</text>
       <text class="metricD" x="0" y="44" fill="${dKP.fill}">
         ${dKP.text}
       </text>
     </g>
-
-    <!-- Dead -->
-    <g transform="translate(${metricBlockGapX*2},0)" opacity="${showDeadMetric ? 1 : 0}">
+<g transform="translate(${metricBlockGapX*2},0)" opacity="${showDeadMetric ? 1 : 0}">
       <text class="metricH" x="0" y="0">Dead</text>
       <text class="metricV" x="0" y="26">${nfNum(player.dead)}</text>
       <text class="metricD" x="0" y="44" fill="${dDead.fill}">
         ${dDead.text}
       </text>
     </g>
-
-    <!-- T5 -->
-    <g transform="translate(${metricBlockGapX*3},0)">
+<g transform="translate(${metricBlockGapX*3},0)">
       <text class="metricH" x="0" y="0">T5</text>
       <text class="metricV" x="0" y="26">${nfNum(player.t5)}</text>
       <text class="metricD" x="0" y="44" fill="${dT5.fill}">
         ${dT5.text}
       </text>
     </g>
-
-    <!-- T4 -->
-    <g transform="translate(${metricBlockGapX*4},0)">
+<g transform="translate(${metricBlockGapX*4},0)">
       <text class="metricH" x="0" y="0">T4</text>
       <text class="metricV" x="0" y="26">${nfNum(player.t4)}</text>
       <text class="metricD" x="0" y="44" fill="${dT4.fill}">
@@ -565,14 +549,10 @@ function playerCardSVG(bundle) {
       </text>
     </g>
   </g>
-
-  <!-- T-TT--- -->
-  <g transform="translate(${padX},${barsStartY})">
+<g transform="translate(${padX},${barsStartY})">
     ${barsSvg}
   </g>
-
-  <!-- LEFT TO GO -->
-  <g transform="translate(${padX},${bottomYBase})">
+<g transform="translate(${padX},${bottomYBase})">
     <text x="0" y="0"
           font-family="Inter, system-ui"
           font-size="14"
@@ -725,8 +705,7 @@ function kvkTopSVG(rows, meta = {}) {
 
     lines += `
       <g>
-        <!--  -->
-        <text
+<text
           x="${cardX + innerPadX}"
           y="${yTop}"
           fill="${textCol}"
@@ -736,9 +715,7 @@ function kvkTopSVG(rows, meta = {}) {
         >
           ${rankText}
         </text>
-
-        <!-- ' -->
-        <text
+<text
           x="${cardX + innerPadX + 40}"
           y="${yTop}"
           fill="${textCol}"
@@ -748,9 +725,7 @@ function kvkTopSVG(rows, meta = {}) {
         >
           ${safeName}
         </text>
-
-        <!--  - -->
-        <rect
+<rect
           x="${cardX + innerPadX + 40}"
           y="${yTop + 16}"
           width="${barW}"
@@ -758,9 +733,7 @@ function kvkTopSVG(rows, meta = {}) {
           rx="4"
           fill="${trackCol}"
         />
-
-        <!--   0..100% -->
-        ${
+${
           wBase > 0
             ? `<rect
                  x="${cardX + innerPadX + 40}"
@@ -772,9 +745,7 @@ function kvkTopSVG(rows, meta = {}) {
                />`
             : ""
         }
-
-        <!--  100..200% -->
-        ${
+${
           wOver > 0
             ? `<rect
                  x="${cardX + innerPadX + 40}"
@@ -787,9 +758,7 @@ function kvkTopSVG(rows, meta = {}) {
                />`
             : ""
         }
-
-        <!-- DKP   -->
-        <text
+<text
           x="${cardX + innerPadX + 40}"
           y="${yTop + 16 + barH + 20}"
           fill="${subCol}"
@@ -799,9 +768,7 @@ function kvkTopSVG(rows, meta = {}) {
         >
           ${bottomLeftText}
         </text>
-
-        <!-- %  -->
-        <text
+<text
           x="${cardX + innerPadX + 40 + barW}"
           y="${yTop + 16 + barH + 20}"
           fill="${subCol}"
@@ -837,9 +804,7 @@ function kvkTopSVG(rows, meta = {}) {
       stroke="${borderCol}"
       stroke-width="1"
     />
-
-    <!--  -->
-    <text
+<text
       x="${cardX + innerPadX}"
       y="${cardY + 36}"
       fill="${textCol}"
@@ -849,9 +814,7 @@ function kvkTopSVG(rows, meta = {}) {
     >
       ${title.replace(/&/g, "&amp;").replace(/</g, "&lt;")}
     </text>
-
-    <!-- Updated -->
-    <text
+<text
       x="${cardX + cardW - innerPadX}"
       y="${cardY + 36}"
       fill="${subCol}"
