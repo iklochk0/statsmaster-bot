@@ -607,16 +607,6 @@ async function renderPlayerCardPNG(bundle) {
 
 function hashTopRows(rows) {
   const s = rows
-    .map(
-      (r) =>
-        `${r.player_id}:${r.dkpDone}:${r.goal_dkp}:${r.pct}`
-    )
-    .join("|");
-  return createHash("md5").update(s).digest("hex").slice(0, 12);
-}
-
-function hashTopRows(rows) {
-  const s = rows
     .map((r) => `${r.player_id}:${r.killsDone}:${r.goal_kills}:${r.pct}`)
     .join("|");
   return createHash("md5").update(s).digest("hex").slice(0, 12);
