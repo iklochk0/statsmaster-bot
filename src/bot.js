@@ -99,9 +99,14 @@ const log = {
   error: (o) => logAt("error", o),
 };
 
-
-
 // helpers
+function channelAllowed(msg) {
+  if (!PUBLIC_CHANNEL_ID) return true;
+  if (!msg.guild) return true;
+  const channelId = msg.channel?.id;
+  return channelId === PUBLIC_CHANNEL_ID || channelId === ADMIN_CHANNEL_ID;
+}
+
 function formatTs(tsLike) {
   if (!tsLike) return "-";
   const d = new Date(tsLike);
@@ -145,8 +150,6 @@ function playerCardSVG(bundle) {
     (n === null || n === undefined)
       ? "0"
       : Number(n).toLocaleString("en-US");
-
-  // ¦Ъ¦-¦¬TМ¦-TА¦¬
   const bg          = "#0d121d";
   const panelBg     = "#2a3142";
   const fillPrimary = "#6b7bff"; // 0..100%
@@ -156,8 +159,6 @@ function playerCardSVG(bundle) {
   const goodCol     = "#6ee7a8";
   const badCol      = "#ef5350";
   const zeroCol     = "#7b8193";
-
-  // ¦У¦¦¦-¦-¦¦TВTАTЦTП
   const w = 1100;
   let h = 760;
   const padX   = 24;
@@ -170,14 +171,8 @@ function playerCardSVG(bundle) {
   const barH       = 24;
   const barGapY    = 80;
   const barsStartY = metricsY + 100;
-
-  // ¦б¦¦TЦ¦¬TМ¦¦¦¬ ¦-¦-TАTЦ¦-: main = 3 (Kills, Dead, DKP), farm = 1 (Dead)
   const numBars = 1;
-
-  // ¦Я¦-¦¬¦¬TЖTЦTП ¦-¦¬¦-¦¦TГ TД¦¦TА¦- (TП¦¦TЙ¦- ¦-TГ¦+TГTВTМ)
   const farmsStartY = barsStartY + (barGapY * numBars) + 40;
-
-  // ¦С¦-¦¬¦-¦-¦- Y-¦¬¦-¦¬¦¬TЖTЦTП ¦+¦¬TП ¦-¦¬¦¦¦-TЦTЕ ¦-¦¬¦-¦¦TЦ¦- (LEFT TO GO / LAST FIGHTS)
   let bottomYBase = barsStartY + (barGapY * numBars) + 40;
 
   const leftBoxW   = 500;
@@ -196,8 +191,6 @@ function playerCardSVG(bundle) {
         second: "2-digit",
       })
     : "";
-
-  // ¦+¦¦¦¬TМTВ¦--¦¦¦-¦¬TЦTА
   function renderDelta(valRaw) {
     const v = Number(valRaw) || 0;
     if (v === 0) {
@@ -215,8 +208,6 @@ function playerCardSVG(bundle) {
   const dT5    = renderDelta(deltas.t5);
   const dT4    = renderDelta(deltas.t4);
   const showDeadMetric = player.role === "farm";
-
-  // ¦¬¦-¦-TГ¦+¦-¦-¦- ¦-¦-TАTЦ¦- ¦¬TА¦-¦¦TА¦¦TБTГ
   function progressPieces(done, goal, totalW) {
     if (!goal || goal <= 0) {
       return { wBase: 0, wOver: 0, pctRaw: 0 };
@@ -231,8 +222,6 @@ function playerCardSVG(bundle) {
       pctRaw,
     };
   }
-
-  // TГ¦-TЦ¦-¦¦TАTБ¦-¦¬TМ¦-¦¬¦¦ TА¦¦¦-¦+¦¦TА ¦-¦+¦-¦-¦¦¦- ¦-¦-TА¦-
   function makeBar(labelText, doneVal, goalVal, offsetY) {
     const { wBase, wOver, pctRaw } = progressPieces(doneVal, goalVal, barW);
     return `
@@ -275,8 +264,6 @@ function playerCardSVG(bundle) {
       </g>
     `;
   }
-
-  // ¦С¦-TА ¦+¦¬TП TД¦¦TА¦-¦¬ (Dead only)
   function makeFarmBar(farm, offsetY) {
     const { wBase, wOver, pctRaw } = progressPieces(
       farm.deadDone,
@@ -325,8 +312,6 @@ function playerCardSVG(bundle) {
       </g>
     `;
   }
-
-  // ¦-¦¦¦¦¦+¦¦ TБ¦¬TА¦-¦-¦- ¦¬¦-¦¦TАTЕTГ (TЦ¦-¦¬¦-¦¦¦- Tл¦-¦-TВ¦-TВ¦¦¦¦T¬ ¦-¦¦¦¬ ¦-¦¦TА¦¦¦-¦-¦¦¦- TД¦-¦¦¦¬TГ)
   const badgePct = Number(progress.pct || 0);
   const badgeTag =
     badgePct >= 200 ? "WHALE KILLER" :
@@ -334,10 +319,6 @@ function playerCardSVG(bundle) {
     badgePct >= 100 ? "ON TRACK" :
     badgePct >=  70 ? "KEEP PUSHING" :
                       "WARM UP";
-
-  
-
-  // ¦-TБ¦-¦-¦-¦-TЦ ¦-¦-TА¦¬
   let barsSvg = "";
   if (player.role === "farm") {
     barsSvg = makeBar("Dead", progress.deadDone, goals.dead, 0);
@@ -379,15 +360,9 @@ function playerCardSVG(bundle) {
         </g>
       </g>
     `;
-
-    // ¦п¦¦TЙ¦- TФ тЙе1 TД¦¦TА¦-¦¬ тАФ ¦¬TБTГ¦-¦-TФ¦-¦- ¦-¦¬¦¦¦-TЦ ¦-¦¬¦-¦¦¦¬ ¦¬TЦ¦+ TД¦¦TА¦-¦¬
     bottomYBase = farmsStartY + farmCount * barGapY + 40;
   }
-
-  // ¦Ч¦-¦¦¦-¦¬TМ¦-¦- ¦-¦¬TБ¦-TВ¦- ¦¬¦-¦¬¦-TВ¦-¦- тАФ ¦¬TЦ¦+ ¦-¦¬¦¦¦-TЦ ¦-¦¬¦-¦¦¦¬ (LEFT TO GO / LAST FIGHTS)
   h = Math.max(h, bottomYBase + leftBoxH + 60);
-
-  // LAST FIGHTS BOX (¦¬TА¦-¦-¦-TАTГTЗ ¦-TЦ¦+ LEFT TO GO)
   const hasLastFightData =
     lastFight &&
     lastFight.zoneName &&
@@ -512,7 +487,7 @@ function playerCardSVG(bundle) {
     </text>
   </g>
 
-  <!-- ¦Т¦¦TАTЕ¦-TЦ ¦-¦¦TВTА¦¬¦¦¦¬ -->
+  <!-- TT-T -TT -->
   <g transform="translate(${padX},${metricsY})">
 
     <!-- Power -->
@@ -561,7 +536,7 @@ function playerCardSVG(bundle) {
     </g>
   </g>
 
-  <!-- ¦ЯTА¦-¦¦TА¦¦TБ-¦-¦¬¦-¦¦¦¬ -->
+  <!-- T-TT--- -->
   <g transform="translate(${padX},${barsStartY})">
     ${barsSvg}
   </g>
@@ -679,7 +654,7 @@ function kvkTopSVG(rows, meta = {}) {
 
   function barPieces(pctRawNum) {
     const raw = Number(pctRawNum) || 0;
-    const capped = Math.max(0, Math.min(raw, 200)); // РІС–Р·СѓР°Р»СЊРЅРёР№ Р»С–РјС–С‚
+    const capped = Math.max(0, Math.min(raw, 200)); //  
     const basePct = Math.min(capped, 100);
     const overPct = Math.max(Math.min(capped - 100, 100), 0);
     return {
@@ -707,8 +682,6 @@ function kvkTopSVG(rows, meta = {}) {
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;");
-
-    // вњ… DKP Сѓ С€РєР°Р»С– 10 000 (СѓР·РіРѕРґР¶РµРЅРѕ Р· playerCardSVG)
     const visDkpGoal = 10000;
     const visDkpDone = Math.round(((Number(r.pct) || 0) / 100) * visDkpGoal);
 
@@ -722,7 +695,7 @@ function kvkTopSVG(rows, meta = {}) {
 
     lines += `
       <g>
-        <!-- СЂР°РЅРі -->
+        <!--  -->
         <text
           x="${cardX + innerPadX}"
           y="${yTop}"
@@ -734,7 +707,7 @@ function kvkTopSVG(rows, meta = {}) {
           ${rankText}
         </text>
 
-        <!-- С–Рј'СЏ -->
+        <!-- ' -->
         <text
           x="${cardX + innerPadX + 40}"
           y="${yTop}"
@@ -746,7 +719,7 @@ function kvkTopSVG(rows, meta = {}) {
           ${safeName}
         </text>
 
-        <!-- С„РѕРЅ РїСЂРѕРіСЂРµСЃ-Р±Р°СЂСѓ -->
+        <!--  - -->
         <rect
           x="${cardX + innerPadX + 40}"
           y="${yTop + 16}"
@@ -756,7 +729,7 @@ function kvkTopSVG(rows, meta = {}) {
           fill="${trackCol}"
         />
 
-        <!-- Р±Р°Р·РѕРІРёР№ РїСЂРѕРіСЂРµСЃ 0..100% -->
+        <!--   0..100% -->
         ${
           wBase > 0
             ? `<rect
@@ -770,7 +743,7 @@ function kvkTopSVG(rows, meta = {}) {
             : ""
         }
 
-        <!-- РѕРІРµСЂРєР°Рї 100..200% -->
+        <!--  100..200% -->
         ${
           wOver > 0
             ? `<rect
@@ -785,7 +758,7 @@ function kvkTopSVG(rows, meta = {}) {
             : ""
         }
 
-        <!-- DKP РїС–РґРїРёСЃ Р·Р»С–РІР° -->
+        <!-- DKP   -->
         <text
           x="${cardX + innerPadX + 40}"
           y="${yTop + 16 + barH + 20}"
@@ -797,7 +770,7 @@ function kvkTopSVG(rows, meta = {}) {
           ${bottomLeftText}
         </text>
 
-        <!-- % СЃРїСЂР°РІР° -->
+        <!-- %  -->
         <text
           x="${cardX + innerPadX + 40 + barW}"
           y="${yTop + 16 + barH + 20}"
@@ -835,7 +808,7 @@ function kvkTopSVG(rows, meta = {}) {
       stroke-width="1"
     />
 
-    <!-- Р·Р°РіРѕР»РѕРІРѕРє -->
+    <!--  -->
     <text
       x="${cardX + innerPadX}"
       y="${cardY + 36}"
@@ -886,7 +859,7 @@ const client = new Client({
 async function getLinkedPlayerIdOrReply(msg) {
   const linked = await fetchLink(msg.author.id);
   if (!linked) {
-    await msg.reply('Link your account first: `!link <player_id>`');
+    await msg.reply('Link your account first: `!link <player_id>` - Link your Discord to your player_id.');
     return null;
   }
   return linked;
@@ -895,7 +868,7 @@ async function getLinkedPlayerIdOrReply(msg) {
 function parsePlayerId(arg) {
   if (!arg || !/^\d+$/.test(arg)) return null;
   try {
-    return BigInt(arg); // РїСЂРѕСЃС‚Рѕ РІР°Р»С–РґР°С†С–СЏ С‰Рѕ С†Рµ РЅРѕСЂРјР°Р»СЊРЅРµ С‡РёСЃР»Рѕ
+    return BigInt(arg); //      
   } catch {
     return null;
   }
@@ -933,11 +906,11 @@ async function sendFarmRequestEmbedToAdmins(reqId, mainSnap, farmSnap, requester
     new ButtonBuilder()
       .setCustomId(`farmapprove:${reqId}`)
       .setStyle(ButtonStyle.Success)
-      .setLabel("Approve вњ…"),
+      .setLabel("Approve"),
     new ButtonBuilder()
       .setCustomId(`farmreject:${reqId}`)
       .setStyle(ButtonStyle.Danger)
-      .setLabel("Reject вќЊ")
+      .setLabel("Reject")
   );
 
   if (
@@ -972,15 +945,11 @@ client.on("messageCreate", async (msg) => {
   try {
     if (msg.author.bot) return;
     if (!msg.content.startsWith("!")) return;
-
-    // РєР°РЅР°Р»СЊРЅРёР№ РєРѕРЅС‚СЂРѕР»СЊ
     if (!channelAllowed(msg)) {
       const publicMention = PUBLIC_CHANNEL_ID
         ? `<#${PUBLIC_CHANNEL_ID}>`
         : "the allowed channel";
-      return void msg.reply(
-        `вљ пёЏ Please use bot commands in ${publicMention}.`
-      );
+      return void msg.reply(`Please use bot commands in ${publicMention}.`);
     }
 
     const began = Date.now();
@@ -995,12 +964,12 @@ client.on("messageCreate", async (msg) => {
     if (cmd === "help") {
       const HELP_PUBLIC = [
         "**Public commands:**",
-        "`!stats <player_id>` вЂ” Player card (kills for main, dead for farm, farms, zone).",
-        "`!me` вЂ” Your card (after `!link`).",
-        "`!link <player_id>` вЂ” Link your Discord to your player_id.",
-        "`!unlink` вЂ” Unlink yourself.",
-        "`!farm <farm_id>` вЂ” Attach a farm (after `!link`).",
-        "`!help` вЂ” This help.",
+        "`!stats <player_id>` - Player card (kills for main, dead for farm, farms, zone).",
+        "`!me` - Your card (after `!link`).",
+        "`!link <player_id>` - Link your Discord to your player_id.",
+        "`!unlink` - Unlink yourself.",
+        "`!farm <farm_id>` - Attach a farm (after `!link`).",
+        "`!help` - This help.",
       ].join("\n");
       return void msg.reply(HELP_PUBLIC);
     }
@@ -1009,7 +978,9 @@ client.on("messageCreate", async (msg) => {
     if (cmd === "stats") {
       const idArg = args[0];
       if (!idArg || !/^\d+$/.test(idArg)) {
-        return void msg.reply("Usage: `!stats <player_id>`");
+        return void msg.reply(
+          "Usage: `!stats <player_id>`"
+        );
       }
 
       const cd = checkCooldown(msg.author.id);
@@ -1096,19 +1067,15 @@ client.on("messageCreate", async (msg) => {
       });
       return;
     }
-
-    // !link <player_id> Р°Р±Рѕ !link @user <player_id> (Р°РґРјС–РЅ РјРѕР¶Рµ Р»С–РЅРєР°С‚Рё С–РЅС€РёС…)
     if (cmd === "link") {
       const mention = msg.mentions.users.first() ?? msg.author;
       const idArg = mention === msg.author ? args[0] : args[1];
 
       if (!idArg || !/^\d+$/.test(idArg)) {
         return void msg.reply(
-          "Usage: `!link <player_id>` or `!link @user <player_id>` (admin only for others)"
+          "Usage: `!link <player_id>` - Link your Discord to your player_id."
         );
       }
-
-      // РїРµСЂРµРІС–СЂСЏС”РјРѕ С‰Рѕ С‚Р°РєРёР№ player С–СЃРЅСѓС”
       const snap = await fetchPlayerSnapshot(idArg);
       if (!snap) {
         return void msg.reply(
@@ -1124,7 +1091,7 @@ client.on("messageCreate", async (msg) => {
 
       await setLink(mention.id, idArg);
       return void msg.reply(
-        `Linked ${mention} в†” player_id **${idArg}**.`
+        `Linked ${mention} -> player_id **${idArg}**.`
       );
     }
 
@@ -1145,31 +1112,23 @@ client.on("messageCreate", async (msg) => {
 
       await removeLink(mention.id);
       return void msg.reply(
-        `Unlinked ${mention} в†” player_id **${playerId}**.`
+        `Unlinked ${mention} -> player_id **${playerId}**.`
       );
     }
 
-    // РЈР’РђР“Рђ: СЃС‚Р°СЂРёР№ РїСѓР±Р»С–С‡РЅРёР№ !top (KP/Power snapshot) вЂ” Р’РР”РђР›Р•РќРћ
-
     // !farm <farm_player_id>
-    // СЋР·РµСЂ РїСЂРѕСЃРёС‚СЊ: "РѕСЃСЊ С†Рµ РјРѕСЏ С„РµСЂРјР°"
     if (cmd === "farm") {
-      // СЏРєС‰Рѕ РѕРґРёРЅ Р°СЂРіСѓРјРµРЅС‚ -> СЋР·РµСЂСЃСЊРєРёР№ СЂРµР¶РёРј
       if (args.length === 1) {
         const farmIdArg = args[0];
-
-        // РїРµСЂРµРІС–СЂРєР° С„РѕСЂРјР°С‚Сѓ farm_id
         if (!farmIdArg || !/^\d+$/.test(farmIdArg)) {
-          return void msg.reply("Usage: `!farm <farm_id>` after you `!link` your main.");
+          return void msg.reply(
+            "Usage: `!farm <farm_id>` - Attach a farm (after `!link`)."
+          );
         }
-
-        // С€СѓРєР°С”РјРѕ Р№РѕРіРѕ main С‡РµСЂРµР· fetchLink()
         const mainId = await fetchLink(msg.author.id);
         if (!mainId) {
           return void msg.reply("You must `!link <your_main_id>` first before adding a farm.");
         }
-
-        // С„С–РєСЃСѓС”РјРѕ С‰Рѕ РѕР±РёРґРІР° С–СЃРЅСѓСЋС‚СЊ Сѓ players
         const mainSnap = await fetchPlayerSnapshot(mainId);
         if (!mainSnap) {
           return void msg.reply("Your linked main is not in DB yet. Ask admin to import you first.");
@@ -1179,8 +1138,6 @@ client.on("messageCreate", async (msg) => {
         if (!farmSnap) {
           return void msg.reply(`Farm player_id **${farmIdArg}** not found in DB.`);
         }
-
-        // СЃС‚РІРѕСЂРёС‚Рё pending-Р·Р°СЏРІРєСѓ
         let reqRow;
         try {
           reqRow = await createFarmLinkRequest(
@@ -1193,8 +1150,6 @@ client.on("messageCreate", async (msg) => {
             "This farm is already linked or pending another request."
           );
         }
-
-        // РЅР°РґС–СЃР»Р°С‚Рё embed Р· РєРЅРѕРїРєР°РјРё РІ Р°РґРјС–РЅ-РєР°РЅР°Р»
         const posted = await sendFarmRequestEmbedToAdmins(
           reqRow.request_id,
           mainSnap,
@@ -1212,10 +1167,7 @@ client.on("messageCreate", async (msg) => {
           );
         }
       }
-
-      // СЏРєС‰Рѕ РґРІР° Р°СЂРіСѓРјРµРЅС‚Рё -> Р°РґРјС–РЅСЃСЊРєРёР№ СЂРµР¶РёРј
       if (args.length === 2) {
-        // С‚С–Р»СЊРєРё Р°РґРјС–РЅРё РјРѕР¶СѓС‚СЊ С‚СѓС‚
         if (!isAdmin(msg)) {
           return void msg.reply("Only admins can do `!farm <main_id> <farm_id>`.");
         }
@@ -1246,7 +1198,7 @@ client.on("messageCreate", async (msg) => {
           reqRow = await createFarmLinkRequest(
             mainIdArg,
             farmIdArg,
-            msg.author.id // Р°РґРјС–РЅ С…С‚Рѕ РїРѕРґР°РІ
+            msg.author.id //   
           );
         } catch (e) {
           return void msg.reply(
@@ -1271,26 +1223,21 @@ client.on("messageCreate", async (msg) => {
           );
         }
       }
-
-      // С–РЅР°РєС€Рµ (0 Р°СЂРіСѓРјРµРЅС‚С–РІ Р°Р±Рѕ >2)
       return void msg.reply(
-        "Usage:\n- Player: `!farm <farm_id>` (your main must be linked with `!link`)\n- Admin: `!farm <main_id> <farm_id>`"
+        "Usage:\n- Player: `!farm <farm_id>` - Attach a farm (after `!link`)."
       );
     }
-
-
-    // !helpadmin (РїРѕРєР°Р·СѓС” С‚С–Р»СЊРєРё Р°РґРјС–РЅР°Рј)
     if (cmd === "helpadmin") {
       if (!isAdmin(msg)) return void msg.reply("Admins only.");
       const HELP_ADMIN = [
         "**Admin commands:**",
-        "`!helpadmin` вЂ” this list.",
-        "`!kvk start [name]` вЂ” start new KvK session (admin channel only).",
-        "`!top [N] [text]` вЂ” KvK leaderboard (Kills%).",
-        "`!topkills [N] [text]` вЂ” KvK leaderboard (kills%).",
-        "`!link @user <player_id>` вЂ” Link mentioned user to player.",
-        "`!unlink [@user]` вЂ” Unlink mentioned user.",
-        "`!backup` вЂ” Make backup.",
+        "`!helpadmin`  this list.",
+        "`!kvk start [name]`  start new KvK session (admin channel only).",
+        "`!top [N] [text]`  KvK leaderboard (Kills%).",
+        "`!topkills [N] [text]`  KvK leaderboard (kills%).",
+        "`!link @user <player_id>`  Link mentioned user to player.",
+        "`!unlink [@user]`  Unlink mentioned user.",
+        "`!backup`  Make backup.",
         "Farm approvals happen via buttons in admin channel.",
       ].join("\n");
       return void msg.reply(HELP_ADMIN);
@@ -1303,8 +1250,6 @@ client.on("messageCreate", async (msg) => {
         "Admins only. Public commands are: `!stats`, `!me`, `!link`, `!unlink`, `!farm`, `!help`."
       );
     }
-
-    // РќРћР’Р•: !top  (DKP leaderboard; С†Рµ РєРѕР»РёС€РЅС–Р№ !kvk top)
     if (cmd === "top") {
       const argOffset = 0;
       const limit = Math.min(
@@ -1327,8 +1272,6 @@ client.on("messageCreate", async (msg) => {
         });
         return void msg.reply(lines.join("\n"));
       }
-
-      // timestamp РґР»СЏ header "Updated:"
       const ts = await fetchMaxUpdateFor(
         rows.map((r) => r.player_id).filter(Boolean)
       );
@@ -1366,11 +1309,7 @@ client.on("messageCreate", async (msg) => {
       const rawLimit = parseInt(rawLimitArg, 10);
       const hasLimit = Number.isFinite(rawLimit);
       const limit = Math.min(Math.max(hasLimit ? rawLimit : 10, 1), 50);
-
-      // ---- РґР°РЅС– ----
       const rows = await buildTopListData(limit);
-
-      // ---- СЃРѕСЂС‚ ----
       rows.sort((a, b) => b.killsDone - a.killsDone);
 
       // ---- text mode ----
@@ -1379,7 +1318,7 @@ client.on("messageCreate", async (msg) => {
       if (asText) {
         const lines = rows.map(
           (r, i) =>
-            `**${i + 1}.** ${r.name ?? r.player_id} вЂ” ${r.killsDone.toLocaleString(
+            `**${i + 1}.** ${r.name ?? r.player_id}  ${r.killsDone.toLocaleString(
               "en-US"
             )} kills`
         );
@@ -1415,12 +1354,11 @@ client.on("messageCreate", async (msg) => {
 
     // !backup
     if (cmd === "backup") {
-      // С‚С–Р»СЊРєРё РІ Р°РґРјС–РЅ-РєР°РЅР°Р»С–, С‰РѕР± РІРµР»РёРєС– С„Р°Р№Р»Рё РЅРµ СЃРёРїР°Р»РёСЃСЊ Сѓ РїСѓР±Р»С–С‡РЅРёР№
       if (msg.channel.id !== ADMIN_CHANNEL_ID) {
         return void msg.reply("Run `!backup` in the admin channel.");
       }
 
-      await msg.channel.send("вЏі Creating full backup (Excel + JSON zip)...");
+      await msg.channel.send(" Creating full backup (Excel + JSON zip)...");
       try {
         const { xlsxPath, zipPath } = await exportFullBackup();
 
@@ -1429,16 +1367,16 @@ client.on("messageCreate", async (msg) => {
         try { files.push(new AttachmentBuilder(zipPath)); } catch {}
 
         if (files.length === 0) {
-          return void msg.reply("вќЊ Backup created, but files could not be attached (too large?). Check the server `/backups` folder.");
+          return void msg.reply(" Backup created, but files could not be attached (too large?). Check the server `/backups` folder.");
         }
 
         await msg.channel.send({
-          content: "вњ… Backup ready:",
+          content: " Backup ready:",
           files
         });
       } catch (e) {
         console.error("backup error:", e);
-        await msg.channel.send("вќЊ Backup failed: " + (e?.message || e));
+        await msg.channel.send(" Backup failed: " + (e?.message || e));
       }
       return;
     }
@@ -1449,7 +1387,6 @@ client.on("messageCreate", async (msg) => {
 
       // !kvk start [name...]
       if (sub === "start") {
-        // С‚С–Р»СЊРєРё РІ Р°РґРјС–РЅ-РєР°РЅР°Р»С–
         if (msg.channel.id !== ADMIN_CHANNEL_ID) {
           return void msg.reply(
             "Run `!kvk start` in the admin channel."
@@ -1463,30 +1400,24 @@ client.on("messageCreate", async (msg) => {
           `Started KvK #${kvk_id}${name ? ` (${name})` : ""}.`
         );
       }
-
-      // (РєРѕР»РёС€РЅС–Р№ `!kvk top` вЂ” РІРёРґР°Р»РµРЅРѕ)
       return void msg.reply(
         "Usage: `!kvk start [name]`"
       );
     }
-
-    // СЏРєС‰Рѕ РєРѕРјР°РЅРґР° РЅРµ РІРїС–Р·РЅР°РЅР°
     return void msg.reply(
-      "Unknown command. See `!help` or `!helpadmin`."
+      "Unknown command. See `!help` - This help.
     );
   } catch (e) {
     log.error({ err: String(e?.stack || e), where: "messageCreate" });
     try {
-      await msg.reply("вљ пёЏ Internal error. Admins were notified.");
+      await msg.reply(" Internal error. Admins were notified.");
     } catch {}
-
-    // Р·Р°Р»РѕРіР°С‚Рё РІ LOG_CHANNEL_ID
     const targetId = LOG_CHANNEL_ID || ADMIN_CHANNEL_ID || PUBLIC_CHANNEL_ID;
     const ch = client.channels.cache.get(targetId);
     if (ch && typeof ch.isTextBased === "function" && ch.isTextBased()) {
       ch
         .send(
-          `вљ пёЏ Error for message "${msg.content}": \`${String(
+          ` Error for message "${msg.content}": \`${String(
             e?.message || e
           )}\``
         )
@@ -1500,17 +1431,15 @@ client.on("messageCreate", async (msg) => {
 client.on("interactionCreate", async (interaction) => {
   try {
     if (!interaction.isButton()) return;
-
-    // Р±РµР·РїРµРєР°: С‚С–Р»СЊРєРё РІ Р°РґРјС–РЅ-РєР°РЅР°Р»С– С– С‚С–Р»СЊРєРё Р°РґРјС–РЅРё РјРѕР¶СѓС‚СЊ Р¶Р°С‚Рё
     if (interaction.channelId !== ADMIN_CHANNEL_ID) {
       return void interaction.reply({
-        content: "вќЊ Use this in admin channel.",
+        content: " Use this in admin channel.",
         ephemeral: true,
       });
     }
     if (!isAdminMember(interaction.member)) {
       return void interaction.reply({
-        content: "вќЊ Admins only.",
+        content: " Admins only.",
         ephemeral: true,
       });
     }
@@ -1521,15 +1450,13 @@ client.on("interactionCreate", async (interaction) => {
 
     if (!approveMatch && !rejectMatch) {
       return void interaction.reply({
-        content: "вќ” Unknown button.",
+        content: " Unknown button.",
         ephemeral: true,
       });
     }
 
     if (approveMatch) {
       const reqId = approveMatch[1];
-
-      // РѕРЅРѕРІР»СЋС”РјРѕ СЃС‚Р°С‚СѓСЃ Сѓ Р‘Р” в†’ approved
       const row = await approveFarmLink(reqId);
       if (!row) {
         return void interaction.reply({
@@ -1537,15 +1464,9 @@ client.on("interactionCreate", async (interaction) => {
           ephemeral: true,
         });
       }
-
-      // Р·СЂРѕР±РёС‚Рё С„РµСЂРјСѓ С„РµСЂРјРѕСЋ (С†С–Р»С– = farm)
       await markAsFarmAndRecalcGoals(row.farm_player_id);
-
-      // Р·С–Р±СЂР°С‚Рё РґР°РЅС– РґР»СЏ DM
       const mainBasic = await fetchPlayerBasic(row.owner_player_id);
       const farmBasic = await fetchPlayerBasic(row.farm_player_id);
-
-      // DM С‚РѕРјСѓ С…С‚Рѕ Р·Р°РїСЂРѕСЃРёРІ
       const requester = await client.users
         .fetch(row.requested_by_discord_id)
         .catch(() => null);
@@ -1553,21 +1474,19 @@ client.on("interactionCreate", async (interaction) => {
       if (requester) {
         requester
           .send(
-            `вњ… Your farm request was APPROVED.\nMain: ${mainBasic?.name} (${mainBasic?.player_id})\nFarm: ${farmBasic?.name} (${farmBasic?.player_id})`
+            ` Your farm request was APPROVED.\nMain: ${mainBasic?.name} (${mainBasic?.player_id})\nFarm: ${farmBasic?.name} (${farmBasic?.player_id})`
           )
           .catch(() => {});
       }
 
       return void interaction.reply({
-        content: `Approved вњ… request #${reqId}`,
+        content: `Approved  request #${reqId}`,
         ephemeral: true,
       });
     }
 
     if (rejectMatch) {
       const reqId = rejectMatch[1];
-
-      // РѕРЅРѕРІР»СЋС”РјРѕ СЃС‚Р°С‚СѓСЃ Сѓ Р‘Р” в†’ rejected
       const row = await rejectFarmLink(reqId);
       if (!row) {
         return void interaction.reply({
@@ -1575,8 +1494,6 @@ client.on("interactionCreate", async (interaction) => {
           ephemeral: true,
         });
       }
-
-      // DM С‚РѕРјСѓ С…С‚Рѕ Р·Р°РїСЂРѕСЃРёРІ
       const mainBasic = await fetchPlayerBasic(row.owner_player_id);
       const farmBasic = await fetchPlayerBasic(row.farm_player_id);
 
@@ -1587,13 +1504,13 @@ client.on("interactionCreate", async (interaction) => {
       if (requester) {
         requester
           .send(
-            `вќЊ Your farm request was REJECTED.\nMain: ${mainBasic?.name} (${mainBasic?.player_id})\nFarm: ${farmBasic?.name} (${farmBasic?.player_id})`
+            ` Your farm request was REJECTED.\nMain: ${mainBasic?.name} (${mainBasic?.player_id})\nFarm: ${farmBasic?.name} (${farmBasic?.player_id})`
           )
           .catch(() => {});
       }
 
       return void interaction.reply({
-        content: `Rejected вќЊ request #${reqId}`,
+        content: `Rejected  request #${reqId}`,
         ephemeral: true,
       });
     }
@@ -1601,7 +1518,7 @@ client.on("interactionCreate", async (interaction) => {
     console.warn("interactionCreate error:", e?.message || e);
     try {
       await interaction.reply({
-        content: "вљ пёЏ Internal error.",
+        content: " Internal error.",
         ephemeral: true,
       });
     } catch {}
@@ -1616,7 +1533,7 @@ client.once("ready", async () => {
 
 for (const sig of ["SIGINT", "SIGTERM", "SIGQUIT"]) {
   process.on(sig, async () => {
-    console.log(`\n${sig} в†’ closing DB pool...`);
+    console.log(`\n${sig}  closing DB pool...`);
     try {
       await pool.end();
     } catch {}
@@ -1627,7 +1544,7 @@ for (const sig of ["SIGINT", "SIGTERM", "SIGQUIT"]) {
 
 
 if (!process.env.DISCORD_TOKEN || !process.env.DATABASE_URL) {
-  console.error("вќЊ DISCORD_TOKEN or DATABASE_URL missing in .env");
+  console.error(" DISCORD_TOKEN or DATABASE_URL missing in .env");
 }
 
 client.login(process.env.DISCORD_TOKEN); 
