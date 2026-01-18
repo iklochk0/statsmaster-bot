@@ -1,42 +1,10 @@
 // src/bot.js
 //
-// Discord-бот для KvK.
-//
-// ЦЯ ВЕРСІЯ:
-//  - працює з новою моделлю БД (kvk_sessions / kvk_goals / imports / account_links).
-//  - показує картку гравця (!stats / !me)
-//  - ранжує (!top  — це колишній !kvk top, DKP%)
-//  - !link / !unlink привʼязує Discord користувача до player_id
-//  - !farm <mainId> <farmId> -> створює заявку "це моя ферма"
-//      -> бот кидає embed + кнопки в ADMIN_CHANNEL_ID
-//      -> адмін тисне Approve / Reject
-//      -> бот апдейтить account_links, перераховує цілі ферми як farm (dead=600k),
-//         і шле DM юзеру
-//  - !kvk start [name] можна тільки в адмін-каналі
-//
-// Канали (з .env):
-//   PUBLIC_CHANNEL_ID = #individual-stats (юзери)
-//   ADMIN_CHANNEL_ID  = #individual-stats-admin (тільки адміни)
-//
-// Правила:
-//   - звичайні команди можна писати в PUBLIC_CHANNEL_ID
-//   - адмінські штуки типу approve farm / !kvk start / !top робимо в ADMIN_CHANNEL_ID
-//   - адміни можуть користуватись публічними командами в паблік-каналі
-//
-// Відсоток на картці = DKP % (50% kills + 50% dead проти їхніх цілей).
-//
-// DKP_VISUAL_SCALE:
-//   внутрішньо DKP це "до 100", але ми хочемо щоб на картинці було щось типу
-//   "690,815 / 10,000" повсюди де показується DKP.
-//   Тому ми множимо dkpDone і goal_dkp на великий коефіцієнт,
-//   чисто для виводу (UI), не для математики.
-//
-// Кеш: ми кешимо PNG, бо sharp не безкоштовний.
-//
-// p.s. Усі player_id в PG шлемо як string,
-// бо там BIGINT.
-//
-
+// Discord bot for KvK stats:
+// - imports KvK sessions/goals
+// - player stats commands (!stats / !me)
+// - leaderboards (!top / !topkills)
+// - link/unlink and farm approvals
 import "dotenv/config";
 import {
   Client,
@@ -69,8 +37,9 @@ import {
 
 import { exportFullBackup } from "./excelExport.js";
 
-/* ───────────────── healthcheck ───────────────── */
 
+
+// healthcheck server
 const PORT = process.env.PORT || 3000;
 http
   .createServer((req, res) => {
@@ -81,8 +50,9 @@ http
     console.log("healthcheck server on :" + PORT);
   });
 
-/* ───────────────── конфіг ───────────────── */
 
+
+// config
 const ADMIN_ROLE_IDS = String(process.env.ADMIN_ROLE_IDS || "")
   .split(",")
   .map((s) => s.trim())
@@ -97,14 +67,12 @@ const IMG_CACHE_MAX   = Number(process.env.IMG_CACHE_MAX || 120);
 
 const HEAVY_CMD_COOLDOWN_S = Number(process.env.HEAVY_CMD_COOLDOWN_S || 4);
 
+// logging
 const LOG_LEVEL = (process.env.LOG_LEVEL || "info").toLowerCase();
 const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
 
-// Наскільки пафосно показувати DKP на картці / в топі.
-// 290_000 дає цифри типу "690,815 / 29,000,000" при goal=100 внутрішніх DKP.
-const DKP_VISUAL_SCALE = 290_000;
 
-/* ───────────────── логер ───────────────── */
+
 
 function nowIso() {
   return new Date().toISOString();
@@ -131,8 +99,9 @@ const log = {
   error: (o) => logAt("error", o),
 };
 
-/* ───────────────── утиліти форматування ───────────────── */
 
+
+// helpers
 function formatTs(tsLike) {
   if (!tsLike) return "-";
   const d = new Date(tsLike);
@@ -153,125 +122,6 @@ const nf = (x) =>
     Number.isFinite(Number(x)) ? Number(x) : 0
   );
 
-function pct1(x) {
-  const n = Number(x);
-  return Number.isFinite(n) ? Math.round(n * 10) / 10 : 0;
-}
-
-function isAdminMember(member) {
-  if (!member) return false;
-
-  // якщо є список ролей з .env
-  if (ADMIN_ROLE_IDS.length) {
-    // GuildMember (messageCreate)
-    if (member.roles?.cache) {
-      if (member.roles.cache.some((r) => ADMIN_ROLE_IDS.includes(r.id))) {
-        return true;
-      }
-    }
-    // InteractionMember (button interaction) може мати roles як масив айдішок
-    if (Array.isArray(member.roles)) {
-      if (member.roles.some((id) => ADMIN_ROLE_IDS.includes(id))) {
-        return true;
-      }
-    }
-  }
-
-  // fallback: адміністратор перм
-  if (member.permissions) {
-    try {
-      if (
-        member.permissions.has(PermissionsBitField.Flags.Administrator)
-      ) {
-        return true;
-      }
-    } catch {}
-  }
-
-  return false;
-}
-function isAdmin(msg) {
-  return isAdminMember(msg.member);
-}
-
-const lastHeavyUse = new Map(); // userId -> timestamp(ms)
-function checkCooldown(userId) {
-  const now = Date.now();
-  const prev = lastHeavyUse.get(userId) || 0;
-  const restMs = HEAVY_CMD_COOLDOWN_S * 1000 - (now - prev);
-  if (restMs > 0) return Math.ceil(restMs / 1000);
-  lastHeavyUse.set(userId, now);
-  return 0;
-}
-
-function channelAllowed(msg) {
-  const cid = msg.channel?.id;
-  if (!cid) return false;
-  if (cid === PUBLIC_CHANNEL_ID) return true;
-  if (cid === ADMIN_CHANNEL_ID)  return true;
-  return false;
-}
-
-/* ───────────────── кеш PNG ───────────────── */
-
-const imgCache = new Map(); // key -> { buf, t }
-
-function getCached(key) {
-  const v = imgCache.get(key);
-  if (!v) return null;
-  if (Date.now() - v.t > IMG_CACHE_TTL_S * 1000) {
-    imgCache.delete(key);
-    return null;
-  }
-  return v.buf;
-}
-function setCached(key, buf) {
-  if (imgCache.size >= IMG_CACHE_MAX) {
-    const firstKey = imgCache.keys().next().value;
-    if (firstKey) imgCache.delete(firstKey);
-  }
-  imgCache.set(key, { buf, t: Date.now() });
-}
-
-/* ───────────────── discord_links (привʼязка discord ↔ player_id) ───────────────── */
-
-await initSchema();
-
-await pool.query(`
-  CREATE TABLE IF NOT EXISTS discord_links (
-    discord_id TEXT PRIMARY KEY,
-    player_id  BIGINT NOT NULL REFERENCES players(player_id) ON DELETE CASCADE
-  );
-`);
-
-async function fetchLink(discordId) {
-  const { rows } = await pool.query(
-    `SELECT player_id FROM discord_links WHERE discord_id=$1`,
-    [discordId]
-  );
-  return rows[0]?.player_id || null;
-}
-
-async function setLink(discordId, playerId) {
-  await pool.query(
-    `INSERT INTO discord_links(discord_id, player_id)
-     VALUES ($1,$2)
-     ON CONFLICT (discord_id) DO UPDATE SET player_id=excluded.player_id`,
-    [discordId, String(playerId)]
-  );
-}
-
-async function removeLink(discordId) {
-  await pool.query(
-    `DELETE FROM discord_links WHERE discord_id=$1`,
-    [discordId]
-  );
-}
-
-/* ───────────────── SVG картка гравця ─────────────────
-   playerCardSVG(bundle)
-   де bundle = buildStatsCardData(player_id)
-*/
 function playerCardSVG(bundle) {
   const {
     player,
@@ -296,7 +146,7 @@ function playerCardSVG(bundle) {
       ? "0"
       : Number(n).toLocaleString("en-US");
 
-  // Кольори
+  // ¦Ъ¦-¦¬TМ¦-TА¦¬
   const bg          = "#0d121d";
   const panelBg     = "#2a3142";
   const fillPrimary = "#6b7bff"; // 0..100%
@@ -307,7 +157,7 @@ function playerCardSVG(bundle) {
   const badCol      = "#ef5350";
   const zeroCol     = "#7b8193";
 
-  // Геометрія
+  // ¦У¦¦¦-¦-¦¦TВTАTЦTП
   const w = 1100;
   let h = 760;
   const padX   = 24;
@@ -321,13 +171,13 @@ function playerCardSVG(bundle) {
   const barGapY    = 80;
   const barsStartY = metricsY + 100;
 
-  // Скільки барів: main = 3 (Kills, Dead, DKP), farm = 1 (Dead)
-  const numBars = (player.role === "farm") ? 1 : 3;
+  // ¦б¦¦TЦ¦¬TМ¦¦¦¬ ¦-¦-TАTЦ¦-: main = 3 (Kills, Dead, DKP), farm = 1 (Dead)
+  const numBars = 1;
 
-  // Позиція блоку ферм (якщо будуть)
+  // ¦Я¦-¦¬¦¬TЖTЦTП ¦-¦¬¦-¦¦TГ TД¦¦TА¦- (TП¦¦TЙ¦- ¦-TГ¦+TГTВTМ)
   const farmsStartY = barsStartY + (barGapY * numBars) + 40;
 
-  // Базова Y-позиція для нижніх блоків (LEFT TO GO / LAST FIGHTS)
+  // ¦С¦-¦¬¦-¦-¦- Y-¦¬¦-¦¬¦¬TЖTЦTП ¦+¦¬TП ¦-¦¬¦¦¦-TЦTЕ ¦-¦¬¦-¦¦TЦ¦- (LEFT TO GO / LAST FIGHTS)
   let bottomYBase = barsStartY + (barGapY * numBars) + 40;
 
   const leftBoxW   = 500;
@@ -347,11 +197,11 @@ function playerCardSVG(bundle) {
       })
     : "";
 
-  // дельта-колір
+  // ¦+¦¦¦¬TМTВ¦--¦¦¦-¦¬TЦTА
   function renderDelta(valRaw) {
     const v = Number(valRaw) || 0;
     if (v === 0) {
-      return { text: "±0", fill: zeroCol };
+      return { text: "T-0", fill: zeroCol };
     }
     if (v > 0) {
       return { text: "+" + nfNum(v), fill: goodCol };
@@ -364,8 +214,9 @@ function playerCardSVG(bundle) {
   const dDead  = renderDelta(deltas.dead);
   const dT5    = renderDelta(deltas.t5);
   const dT4    = renderDelta(deltas.t4);
+  const showDeadMetric = player.role === "farm";
 
-  // побудова барів прогресу
+  // ¦¬¦-¦-TГ¦+¦-¦-¦- ¦-¦-TАTЦ¦- ¦¬TА¦-¦¦TА¦¦TБTГ
   function progressPieces(done, goal, totalW) {
     if (!goal || goal <= 0) {
       return { wBase: 0, wOver: 0, pctRaw: 0 };
@@ -381,7 +232,7 @@ function playerCardSVG(bundle) {
     };
   }
 
-  // універсальний рендер одного бара
+  // TГ¦-TЦ¦-¦¦TАTБ¦-¦¬TМ¦-¦¬¦¦ TА¦¦¦-¦+¦¦TА ¦-¦+¦-¦-¦¦¦- ¦-¦-TА¦-
   function makeBar(labelText, doneVal, goalVal, offsetY) {
     const { wBase, wOver, pctRaw } = progressPieces(doneVal, goalVal, barW);
     return `
@@ -425,7 +276,7 @@ function playerCardSVG(bundle) {
     `;
   }
 
-  // Бар для ферми (Dead only)
+  // ¦С¦-TА ¦+¦¬TП TД¦¦TА¦-¦¬ (Dead only)
   function makeFarmBar(farm, offsetY) {
     const { wBase, wOver, pctRaw } = progressPieces(
       farm.deadDone,
@@ -475,7 +326,7 @@ function playerCardSVG(bundle) {
     `;
   }
 
-  // бейдж справа зверху (інлайн «автотег» без окремого файлу)
+  // ¦-¦¦¦¦¦+¦¦ TБ¦¬TА¦-¦-¦- ¦¬¦-¦¦TАTЕTГ (TЦ¦-¦¬¦-¦¦¦- Tл¦-¦-TВ¦-TВ¦¦¦¦T¬ ¦-¦¦¦¬ ¦-¦¦TА¦¦¦-¦-¦¦¦- TД¦-¦¦¦¬TГ)
   const badgePct = Number(progress.pct || 0);
   const badgeTag =
     badgePct >= 200 ? "WHALE KILLER" :
@@ -484,46 +335,20 @@ function playerCardSVG(bundle) {
     badgePct >=  70 ? "KEEP PUSHING" :
                       "WARM UP";
 
-  // ==== DKP (10k score view)
-  const visDkpGoal = 10000;
-  const visDkpDone = Math.round(
-    (Number(progress.pct || 0) / 100) * visDkpGoal
-  );
+  
 
-  // основні бари
+  // ¦-TБ¦-¦-¦-¦-TЦ ¦-¦-TА¦¬
   let barsSvg = "";
   if (player.role === "farm") {
-    barsSvg += makeBar(
-      "Dead",
-      progress.deadDone,
-      goals.dead,
-      0
-    );
+    barsSvg = makeBar("Dead", progress.deadDone, goals.dead, 0);
   } else {
-    barsSvg += makeBar(
-      "Kills (T4+T5)",
-      progress.killsDone,
-      goals.kills,
-      0
-    );
-    barsSvg += makeBar(
-      "Dead",
-      progress.deadDone,
-      goals.dead,
-      barGapY
-    );
-    barsSvg += makeBar(
-      "DKP",
-      visDkpDone,
-      visDkpGoal,
-      barGapY * 2
-    );
+    barsSvg = makeBar("Kills (T4+T5)", progress.killsDone, goals.kills, 0);
   }
 
   // LEFT TO GO
   const leftToGoText = (player.role === "farm")
     ? `Dead ${nfNum(progress.deadLeft)}`
-    : `Kills ${nfNum(progress.killsLeft)} • Dead ${nfNum(progress.deadLeft)}`;
+    : `Kills ${nfNum(progress.killsLeft)}`;
 
   // "My Farms"
   let farmsSvg = "";
@@ -555,18 +380,21 @@ function playerCardSVG(bundle) {
       </g>
     `;
 
-    // Якщо є ≥1 ферми — зсуваємо нижні блоки під ферми
+    // ¦п¦¦TЙ¦- TФ тЙе1 TД¦¦TА¦-¦¬ тАФ ¦¬TБTГ¦-¦-TФ¦-¦- ¦-¦¬¦¦¦-TЦ ¦-¦¬¦-¦¦¦¬ ¦¬TЦ¦+ TД¦¦TА¦-¦¬
     bottomYBase = farmsStartY + farmCount * barGapY + 40;
   }
 
-  // Загальна висота полотна — під нижні блоки (LEFT TO GO / LAST FIGHTS)
+  // ¦Ч¦-¦¦¦-¦¬TМ¦-¦- ¦-¦¬TБ¦-TВ¦- ¦¬¦-¦¬¦-TВ¦-¦- тАФ ¦¬TЦ¦+ ¦-¦¬¦¦¦-TЦ ¦-¦¬¦-¦¦¦¬ (LEFT TO GO / LAST FIGHTS)
   h = Math.max(h, bottomYBase + leftBoxH + 60);
 
-  // LAST FIGHTS BOX (праворуч від LEFT TO GO)
+  // LAST FIGHTS BOX (¦¬TА¦-¦-¦-TАTГTЗ ¦-TЦ¦+ LEFT TO GO)
   const hasLastFightData =
     lastFight &&
     lastFight.zoneName &&
     ((lastFight.killsT45 || 0) > 0 || (lastFight.dead || 0) > 0);
+  const lastFightText = player.role === "farm"
+    ? `Dead ${nfNum(lastFight.dead)}`
+    : `Kills ${nfNum(lastFight.killsT45)}`;
 
   const lastFightBox = hasLastFightData
     ? `
@@ -589,7 +417,7 @@ function playerCardSVG(bundle) {
               font-size="18"
               fill="${textCol}"
               font-weight="500">
-          Kills ${nfNum(lastFight.killsT45)} • Dead ${nfNum(lastFight.dead)}
+          ${safe(lastFightText)}
         </text>
       </g>
     `
@@ -684,7 +512,7 @@ function playerCardSVG(bundle) {
     </text>
   </g>
 
-  <!-- Верхні метрики -->
+  <!-- ¦Т¦¦TАTЕ¦-TЦ ¦-¦¦TВTА¦¬¦¦¦¬ -->
   <g transform="translate(${padX},${metricsY})">
 
     <!-- Power -->
@@ -706,7 +534,7 @@ function playerCardSVG(bundle) {
     </g>
 
     <!-- Dead -->
-    <g transform="translate(${metricBlockGapX*2},0)">
+    <g transform="translate(${metricBlockGapX*2},0)" opacity="${showDeadMetric ? 1 : 0}">
       <text class="metricH" x="0" y="0">Dead</text>
       <text class="metricV" x="0" y="26">${nfNum(player.dead)}</text>
       <text class="metricD" x="0" y="44" fill="${dDead.fill}">
@@ -733,7 +561,7 @@ function playerCardSVG(bundle) {
     </g>
   </g>
 
-  <!-- Прогрес-блоки -->
+  <!-- ¦ЯTА¦-¦¦TА¦¦TБ-¦-¦¬¦-¦¦¦¬ -->
   <g transform="translate(${padX},${barsStartY})">
     ${barsSvg}
   </g>
@@ -776,15 +604,20 @@ async function renderPlayerCardPNG(bundle) {
   return buf;
 }
 
-/* ───────────────── KvK TOP SVG (DKP) ─────────────────
-   rows = buildTopListData(limit)
-*/
+
 function hashTopRows(rows) {
   const s = rows
     .map(
       (r) =>
         `${r.player_id}:${r.dkpDone}:${r.goal_dkp}:${r.pct}`
     )
+    .join("|");
+  return createHash("md5").update(s).digest("hex").slice(0, 12);
+}
+
+function hashTopRows(rows) {
+  const s = rows
+    .map((r) => `${r.player_id}:${r.killsDone}:${r.goal_kills}:${r.pct}`)
     .join("|");
   return createHash("md5").update(s).digest("hex").slice(0, 12);
 }
@@ -856,7 +689,7 @@ function kvkTopSVG(rows, meta = {}) {
 
   function barPieces(pctRawNum) {
     const raw = Number(pctRawNum) || 0;
-    const capped = Math.max(0, Math.min(raw, 200)); // візуальний ліміт
+    const capped = Math.max(0, Math.min(raw, 200)); // РІС–Р·СѓР°Р»СЊРЅРёР№ Р»С–РјС–С‚
     const basePct = Math.min(capped, 100);
     const overPct = Math.max(Math.min(capped - 100, 100), 0);
     return {
@@ -885,7 +718,7 @@ function kvkTopSVG(rows, meta = {}) {
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;");
 
-    // ✅ DKP у шкалі 10 000 (узгоджено з playerCardSVG)
+    // вњ… DKP Сѓ С€РєР°Р»С– 10 000 (СѓР·РіРѕРґР¶РµРЅРѕ Р· playerCardSVG)
     const visDkpGoal = 10000;
     const visDkpDone = Math.round(((Number(r.pct) || 0) / 100) * visDkpGoal);
 
@@ -899,7 +732,7 @@ function kvkTopSVG(rows, meta = {}) {
 
     lines += `
       <g>
-        <!-- ранг -->
+        <!-- СЂР°РЅРі -->
         <text
           x="${cardX + innerPadX}"
           y="${yTop}"
@@ -911,7 +744,7 @@ function kvkTopSVG(rows, meta = {}) {
           ${rankText}
         </text>
 
-        <!-- ім'я -->
+        <!-- С–Рј'СЏ -->
         <text
           x="${cardX + innerPadX + 40}"
           y="${yTop}"
@@ -923,7 +756,7 @@ function kvkTopSVG(rows, meta = {}) {
           ${safeName}
         </text>
 
-        <!-- фон прогрес-бару -->
+        <!-- С„РѕРЅ РїСЂРѕРіСЂРµСЃ-Р±Р°СЂСѓ -->
         <rect
           x="${cardX + innerPadX + 40}"
           y="${yTop + 16}"
@@ -933,7 +766,7 @@ function kvkTopSVG(rows, meta = {}) {
           fill="${trackCol}"
         />
 
-        <!-- базовий прогрес 0..100% -->
+        <!-- Р±Р°Р·РѕРІРёР№ РїСЂРѕРіСЂРµСЃ 0..100% -->
         ${
           wBase > 0
             ? `<rect
@@ -947,7 +780,7 @@ function kvkTopSVG(rows, meta = {}) {
             : ""
         }
 
-        <!-- оверкап 100..200% -->
+        <!-- РѕРІРµСЂРєР°Рї 100..200% -->
         ${
           wOver > 0
             ? `<rect
@@ -962,7 +795,7 @@ function kvkTopSVG(rows, meta = {}) {
             : ""
         }
 
-        <!-- DKP підпис зліва -->
+        <!-- DKP РїС–РґРїРёСЃ Р·Р»С–РІР° -->
         <text
           x="${cardX + innerPadX + 40}"
           y="${yTop + 16 + barH + 20}"
@@ -974,7 +807,7 @@ function kvkTopSVG(rows, meta = {}) {
           ${bottomLeftText}
         </text>
 
-        <!-- % справа -->
+        <!-- % СЃРїСЂР°РІР° -->
         <text
           x="${cardX + innerPadX + 40 + barW}"
           y="${yTop + 16 + barH + 20}"
@@ -1012,7 +845,7 @@ function kvkTopSVG(rows, meta = {}) {
       stroke-width="1"
     />
 
-    <!-- заголовок -->
+    <!-- Р·Р°РіРѕР»РѕРІРѕРє -->
     <text
       x="${cardX + innerPadX}"
       y="${cardY + 36}"
@@ -1047,7 +880,7 @@ async function renderKvkTopPNG(rows, meta) {
   return await sharp(Buffer.from(svg, "utf8")).png().toBuffer();
 }
 
-/* ───────────────── Discord client ───────────────── */
+
 
 const client = new Client({
   intents: [
@@ -1058,7 +891,7 @@ const client = new Client({
   ],
 });
 
-/* ───────────────── хелпери команд ───────────────── */
+
 
 async function getLinkedPlayerIdOrReply(msg) {
   const linked = await fetchLink(msg.author.id);
@@ -1072,7 +905,7 @@ async function getLinkedPlayerIdOrReply(msg) {
 function parsePlayerId(arg) {
   if (!arg || !/^\d+$/.test(arg)) return null;
   try {
-    return BigInt(arg); // просто валідація що це нормальне число
+    return BigInt(arg); // РїСЂРѕСЃС‚Рѕ РІР°Р»С–РґР°С†С–СЏ С‰Рѕ С†Рµ РЅРѕСЂРјР°Р»СЊРЅРµ С‡РёСЃР»Рѕ
   } catch {
     return null;
   }
@@ -1110,11 +943,11 @@ async function sendFarmRequestEmbedToAdmins(reqId, mainSnap, farmSnap, requester
     new ButtonBuilder()
       .setCustomId(`farmapprove:${reqId}`)
       .setStyle(ButtonStyle.Success)
-      .setLabel("Approve ✅"),
+      .setLabel("Approve вњ…"),
     new ButtonBuilder()
       .setCustomId(`farmreject:${reqId}`)
       .setStyle(ButtonStyle.Danger)
-      .setLabel("Reject ❌")
+      .setLabel("Reject вќЊ")
   );
 
   if (
@@ -1132,7 +965,6 @@ async function sendFarmRequestEmbedToAdmins(reqId, mainSnap, farmSnap, requester
   return false;
 }
 
-// коли адмін натискає Approve -> ми робимо ферму (recalcGoalsForRoleChange(...,'farm'))
 async function markAsFarmAndRecalcGoals(farmPlayerId) {
   try {
     await recalcGoalsForRoleChange(String(farmPlayerId), "farm");
@@ -1144,20 +976,20 @@ async function markAsFarmAndRecalcGoals(farmPlayerId) {
   }
 }
 
-/* ───────────────── messageCreate ───────────────── */
+
 
 client.on("messageCreate", async (msg) => {
   try {
     if (msg.author.bot) return;
     if (!msg.content.startsWith("!")) return;
 
-    // канальний контроль
+    // РєР°РЅР°Р»СЊРЅРёР№ РєРѕРЅС‚СЂРѕР»СЊ
     if (!channelAllowed(msg)) {
       const publicMention = PUBLIC_CHANNEL_ID
         ? `<#${PUBLIC_CHANNEL_ID}>`
         : "the allowed channel";
       return void msg.reply(
-        `⚠️ Please use bot commands in ${publicMention}.`
+        `вљ пёЏ Please use bot commands in ${publicMention}.`
       );
     }
 
@@ -1167,18 +999,18 @@ client.on("messageCreate", async (msg) => {
 
     log.info({ ...baseCtx(msg), cmd, args });
 
-    /* ===== публічні команди (user) ===== */
+    
 
     // !help
     if (cmd === "help") {
       const HELP_PUBLIC = [
         "**Public commands:**",
-        "`!stats <player_id>` — Player card (kills T4+T5 / dead / DKP, farms, zone).",
-        "`!me` — Your card (after `!link`).",
-        "`!link <player_id>` — Link your Discord to your player_id.",
-        "`!unlink` — Unlink yourself.",
-        "`!farm <farm_id>` — Attach a farm (after `!link`).",
-        "`!help` — This help.",
+        "`!stats <player_id>` вЂ” Player card (kills for main, dead for farm, farms, zone).",
+        "`!me` вЂ” Your card (after `!link`).",
+        "`!link <player_id>` вЂ” Link your Discord to your player_id.",
+        "`!unlink` вЂ” Unlink yourself.",
+        "`!farm <farm_id>` вЂ” Attach a farm (after `!link`).",
+        "`!help` вЂ” This help.",
       ].join("\n");
       return void msg.reply(HELP_PUBLIC);
     }
@@ -1275,7 +1107,7 @@ client.on("messageCreate", async (msg) => {
       return;
     }
 
-    // !link <player_id> або !link @user <player_id> (адмін може лінкати інших)
+    // !link <player_id> Р°Р±Рѕ !link @user <player_id> (Р°РґРјС–РЅ РјРѕР¶Рµ Р»С–РЅРєР°С‚Рё С–РЅС€РёС…)
     if (cmd === "link") {
       const mention = msg.mentions.users.first() ?? msg.author;
       const idArg = mention === msg.author ? args[0] : args[1];
@@ -1286,7 +1118,7 @@ client.on("messageCreate", async (msg) => {
         );
       }
 
-      // перевіряємо що такий player існує
+      // РїРµСЂРµРІС–СЂСЏС”РјРѕ С‰Рѕ С‚Р°РєРёР№ player С–СЃРЅСѓС”
       const snap = await fetchPlayerSnapshot(idArg);
       if (!snap) {
         return void msg.reply(
@@ -1302,7 +1134,7 @@ client.on("messageCreate", async (msg) => {
 
       await setLink(mention.id, idArg);
       return void msg.reply(
-        `Linked ${mention} ↔ player_id **${idArg}**.`
+        `Linked ${mention} в†” player_id **${idArg}**.`
       );
     }
 
@@ -1323,31 +1155,31 @@ client.on("messageCreate", async (msg) => {
 
       await removeLink(mention.id);
       return void msg.reply(
-        `Unlinked ${mention} ↔ player_id **${playerId}**.`
+        `Unlinked ${mention} в†” player_id **${playerId}**.`
       );
     }
 
-    // УВАГА: старий публічний !top (KP/Power snapshot) — ВИДАЛЕНО
+    // РЈР’РђР“Рђ: СЃС‚Р°СЂРёР№ РїСѓР±Р»С–С‡РЅРёР№ !top (KP/Power snapshot) вЂ” Р’РР”РђР›Р•РќРћ
 
     // !farm <farm_player_id>
-    // юзер просить: "ось це моя ферма"
+    // СЋР·РµСЂ РїСЂРѕСЃРёС‚СЊ: "РѕСЃСЊ С†Рµ РјРѕСЏ С„РµСЂРјР°"
     if (cmd === "farm") {
-      // якщо один аргумент -> юзерський режим
+      // СЏРєС‰Рѕ РѕРґРёРЅ Р°СЂРіСѓРјРµРЅС‚ -> СЋР·РµСЂСЃСЊРєРёР№ СЂРµР¶РёРј
       if (args.length === 1) {
         const farmIdArg = args[0];
 
-        // перевірка формату farm_id
+        // РїРµСЂРµРІС–СЂРєР° С„РѕСЂРјР°С‚Сѓ farm_id
         if (!farmIdArg || !/^\d+$/.test(farmIdArg)) {
           return void msg.reply("Usage: `!farm <farm_id>` after you `!link` your main.");
         }
 
-        // шукаємо його main через fetchLink()
+        // С€СѓРєР°С”РјРѕ Р№РѕРіРѕ main С‡РµСЂРµР· fetchLink()
         const mainId = await fetchLink(msg.author.id);
         if (!mainId) {
           return void msg.reply("You must `!link <your_main_id>` first before adding a farm.");
         }
 
-        // фіксуємо що обидва існують у players
+        // С„С–РєСЃСѓС”РјРѕ С‰Рѕ РѕР±РёРґРІР° С–СЃРЅСѓСЋС‚СЊ Сѓ players
         const mainSnap = await fetchPlayerSnapshot(mainId);
         if (!mainSnap) {
           return void msg.reply("Your linked main is not in DB yet. Ask admin to import you first.");
@@ -1358,7 +1190,7 @@ client.on("messageCreate", async (msg) => {
           return void msg.reply(`Farm player_id **${farmIdArg}** not found in DB.`);
         }
 
-        // створити pending-заявку
+        // СЃС‚РІРѕСЂРёС‚Рё pending-Р·Р°СЏРІРєСѓ
         let reqRow;
         try {
           reqRow = await createFarmLinkRequest(
@@ -1372,7 +1204,7 @@ client.on("messageCreate", async (msg) => {
           );
         }
 
-        // надіслати embed з кнопками в адмін-канал
+        // РЅР°РґС–СЃР»Р°С‚Рё embed Р· РєРЅРѕРїРєР°РјРё РІ Р°РґРјС–РЅ-РєР°РЅР°Р»
         const posted = await sendFarmRequestEmbedToAdmins(
           reqRow.request_id,
           mainSnap,
@@ -1391,9 +1223,9 @@ client.on("messageCreate", async (msg) => {
         }
       }
 
-      // якщо два аргументи -> адмінський режим
+      // СЏРєС‰Рѕ РґРІР° Р°СЂРіСѓРјРµРЅС‚Рё -> Р°РґРјС–РЅСЃСЊРєРёР№ СЂРµР¶РёРј
       if (args.length === 2) {
-        // тільки адміни можуть тут
+        // С‚С–Р»СЊРєРё Р°РґРјС–РЅРё РјРѕР¶СѓС‚СЊ С‚СѓС‚
         if (!isAdmin(msg)) {
           return void msg.reply("Only admins can do `!farm <main_id> <farm_id>`.");
         }
@@ -1424,7 +1256,7 @@ client.on("messageCreate", async (msg) => {
           reqRow = await createFarmLinkRequest(
             mainIdArg,
             farmIdArg,
-            msg.author.id // адмін хто подав
+            msg.author.id // Р°РґРјС–РЅ С…С‚Рѕ РїРѕРґР°РІ
           );
         } catch (e) {
           return void msg.reply(
@@ -1450,31 +1282,31 @@ client.on("messageCreate", async (msg) => {
         }
       }
 
-      // інакше (0 аргументів або >2)
+      // С–РЅР°РєС€Рµ (0 Р°СЂРіСѓРјРµРЅС‚С–РІ Р°Р±Рѕ >2)
       return void msg.reply(
         "Usage:\n- Player: `!farm <farm_id>` (your main must be linked with `!link`)\n- Admin: `!farm <main_id> <farm_id>`"
       );
     }
 
 
-    // !helpadmin (показує тільки адмінам)
+    // !helpadmin (РїРѕРєР°Р·СѓС” С‚С–Р»СЊРєРё Р°РґРјС–РЅР°Рј)
     if (cmd === "helpadmin") {
       if (!isAdmin(msg)) return void msg.reply("Admins only.");
       const HELP_ADMIN = [
         "**Admin commands:**",
-        "`!helpadmin` — this list.",
-        "`!kvk start [name]` — start new KvK session (admin channel only).",
-        "`!top [N] [text]` — KvK leaderboard (DKP%).",
-        "`!topkills [N] [text]` — KvK leaderboard (kills%).",
-        "`!link @user <player_id>` — Link mentioned user to player.",
-        "`!unlink [@user]` — Unlink mentioned user.",
-        "`!backup` — Make backup.",
+        "`!helpadmin` вЂ” this list.",
+        "`!kvk start [name]` вЂ” start new KvK session (admin channel only).",
+        "`!top [N] [text]` вЂ” KvK leaderboard (Kills%).",
+        "`!topkills [N] [text]` вЂ” KvK leaderboard (kills%).",
+        "`!link @user <player_id>` вЂ” Link mentioned user to player.",
+        "`!unlink [@user]` вЂ” Unlink mentioned user.",
+        "`!backup` вЂ” Make backup.",
         "Farm approvals happen via buttons in admin channel.",
       ].join("\n");
       return void msg.reply(HELP_ADMIN);
     }
 
-    /* ===== далі команди, які вимагають адміна ===== */
+    
 
     if (!isAdmin(msg)) {
       return void msg.reply(
@@ -1482,10 +1314,11 @@ client.on("messageCreate", async (msg) => {
       );
     }
 
-    // НОВЕ: !top  (DKP leaderboard; це колишній !kvk top)
+    // РќРћР’Р•: !top  (DKP leaderboard; С†Рµ РєРѕР»РёС€РЅС–Р№ !kvk top)
     if (cmd === "top") {
+      const argOffset = 0;
       const limit = Math.min(
-        Math.max(parseInt(args[0] || "10", 10) || 10, 1),
+        Math.max(parseInt(args[argOffset] || "10", 10) || 10, 1),
         50
       );
       const asText = (args[argOffset + 1] || "").toLowerCase() === "text";
@@ -1499,22 +1332,20 @@ client.on("messageCreate", async (msg) => {
 
       if (asText) {
         const lines = rows.map((r, i) => {
-        const visDkpGoal = 10000;
-        const visDkpDone = Math.round(((Number(r.pct) || 0) / 100) * visDkpGoal);
-          return `**${i + 1}.** ${r.name ?? r.player_id} — ${pct1(
-            r.pct
-          )}% (DKP ${nf(visDkpDone)}/${nf(visDkpGoal)})`;
+          const killsPct = pct1NoRound(r.pct);
+          return `**${i + 1}.** ${r.name ?? r.player_id} - ${killsPct}% (Kills ${nf(r.killsDone)}/${nf(r.goal_kills)})`;
         });
         return void msg.reply(lines.join("\n"));
       }
 
-      // timestamp для header "Updated:"
+      // timestamp РґР»СЏ header "Updated:"
       const ts = await fetchMaxUpdateFor(
         rows.map((r) => r.player_id).filter(Boolean)
       );
       const meta = {
-        title: `KvK Top ${rows.length}`,
+        title: `KvK Top ${rows.length} by Kills`,
         updated: formatTs(ts),
+        sortBy: "kills",
       };
 
       const cacheKey = `top:${limit}:${hashTopRows(rows)}`;
@@ -1531,7 +1362,7 @@ client.on("messageCreate", async (msg) => {
       return;
     }
 
-    // ===== NEW: !topkills / !top kills / !top k =====
+    // ===== NEW: !topKills ${nf(r.killsDone)}/${nf(r.goal_kills)} !top Kills ${nf(r.killsDone)}/${nf(r.goal_kills)} !top k =====
     const isTopKills =
       cmd === "topkills" ||
       (cmd === "top" && (args[0] || "").toLowerCase() === "kills") ||
@@ -1546,10 +1377,10 @@ client.on("messageCreate", async (msg) => {
       const hasLimit = Number.isFinite(rawLimit);
       const limit = Math.min(Math.max(hasLimit ? rawLimit : 10, 1), 50);
 
-      // ---- дані ----
+      // ---- РґР°РЅС– ----
       const rows = await buildTopListData(limit);
 
-      // ---- сорт ----
+      // ---- СЃРѕСЂС‚ ----
       rows.sort((a, b) => b.killsDone - a.killsDone);
 
       // ---- text mode ----
@@ -1558,7 +1389,7 @@ client.on("messageCreate", async (msg) => {
       if (asText) {
         const lines = rows.map(
           (r, i) =>
-            `**${i + 1}.** ${r.name ?? r.player_id} — ${r.killsDone.toLocaleString(
+            `**${i + 1}.** ${r.name ?? r.player_id} вЂ” ${r.killsDone.toLocaleString(
               "en-US"
             )} kills`
         );
@@ -1594,12 +1425,12 @@ client.on("messageCreate", async (msg) => {
 
     // !backup
     if (cmd === "backup") {
-      // тільки в адмін-каналі, щоб великі файли не сипались у публічний
+      // С‚С–Р»СЊРєРё РІ Р°РґРјС–РЅ-РєР°РЅР°Р»С–, С‰РѕР± РІРµР»РёРєС– С„Р°Р№Р»Рё РЅРµ СЃРёРїР°Р»РёСЃСЊ Сѓ РїСѓР±Р»С–С‡РЅРёР№
       if (msg.channel.id !== ADMIN_CHANNEL_ID) {
         return void msg.reply("Run `!backup` in the admin channel.");
       }
 
-      await msg.channel.send("⏳ Creating full backup (Excel + JSON zip)...");
+      await msg.channel.send("вЏі Creating full backup (Excel + JSON zip)...");
       try {
         const { xlsxPath, zipPath } = await exportFullBackup();
 
@@ -1608,16 +1439,16 @@ client.on("messageCreate", async (msg) => {
         try { files.push(new AttachmentBuilder(zipPath)); } catch {}
 
         if (files.length === 0) {
-          return void msg.reply("❌ Backup created, but files could not be attached (too large?). Check the server `/backups` folder.");
+          return void msg.reply("вќЊ Backup created, but files could not be attached (too large?). Check the server `/backups` folder.");
         }
 
         await msg.channel.send({
-          content: "✅ Backup ready:",
+          content: "вњ… Backup ready:",
           files
         });
       } catch (e) {
         console.error("backup error:", e);
-        await msg.channel.send("❌ Backup failed: " + (e?.message || e));
+        await msg.channel.send("вќЊ Backup failed: " + (e?.message || e));
       }
       return;
     }
@@ -1628,7 +1459,7 @@ client.on("messageCreate", async (msg) => {
 
       // !kvk start [name...]
       if (sub === "start") {
-        // тільки в адмін-каналі
+        // С‚С–Р»СЊРєРё РІ Р°РґРјС–РЅ-РєР°РЅР°Р»С–
         if (msg.channel.id !== ADMIN_CHANNEL_ID) {
           return void msg.reply(
             "Run `!kvk start` in the admin channel."
@@ -1643,29 +1474,29 @@ client.on("messageCreate", async (msg) => {
         );
       }
 
-      // (колишній `!kvk top` — видалено)
+      // (РєРѕР»РёС€РЅС–Р№ `!kvk top` вЂ” РІРёРґР°Р»РµРЅРѕ)
       return void msg.reply(
         "Usage: `!kvk start [name]`"
       );
     }
 
-    // якщо команда не впізнана
+    // СЏРєС‰Рѕ РєРѕРјР°РЅРґР° РЅРµ РІРїС–Р·РЅР°РЅР°
     return void msg.reply(
       "Unknown command. See `!help` or `!helpadmin`."
     );
   } catch (e) {
     log.error({ err: String(e?.stack || e), where: "messageCreate" });
     try {
-      await msg.reply("⚠️ Internal error. Admins were notified.");
+      await msg.reply("вљ пёЏ Internal error. Admins were notified.");
     } catch {}
 
-    // залогати в LOG_CHANNEL_ID
+    // Р·Р°Р»РѕРіР°С‚Рё РІ LOG_CHANNEL_ID
     const targetId = LOG_CHANNEL_ID || ADMIN_CHANNEL_ID || PUBLIC_CHANNEL_ID;
     const ch = client.channels.cache.get(targetId);
     if (ch && typeof ch.isTextBased === "function" && ch.isTextBased()) {
       ch
         .send(
-          `⚠️ Error for message "${msg.content}": \`${String(
+          `вљ пёЏ Error for message "${msg.content}": \`${String(
             e?.message || e
           )}\``
         )
@@ -1674,22 +1505,22 @@ client.on("messageCreate", async (msg) => {
   }
 });
 
-/* ───────────────── interactionCreate (кнопки Approve / Reject ферми) ───────────────── */
+
 
 client.on("interactionCreate", async (interaction) => {
   try {
     if (!interaction.isButton()) return;
 
-    // безпека: тільки в адмін-каналі і тільки адміни можуть жати
+    // Р±РµР·РїРµРєР°: С‚С–Р»СЊРєРё РІ Р°РґРјС–РЅ-РєР°РЅР°Р»С– С– С‚С–Р»СЊРєРё Р°РґРјС–РЅРё РјРѕР¶СѓС‚СЊ Р¶Р°С‚Рё
     if (interaction.channelId !== ADMIN_CHANNEL_ID) {
       return void interaction.reply({
-        content: "❌ Use this in admin channel.",
+        content: "вќЊ Use this in admin channel.",
         ephemeral: true,
       });
     }
     if (!isAdminMember(interaction.member)) {
       return void interaction.reply({
-        content: "❌ Admins only.",
+        content: "вќЊ Admins only.",
         ephemeral: true,
       });
     }
@@ -1700,7 +1531,7 @@ client.on("interactionCreate", async (interaction) => {
 
     if (!approveMatch && !rejectMatch) {
       return void interaction.reply({
-        content: "❔ Unknown button.",
+        content: "вќ” Unknown button.",
         ephemeral: true,
       });
     }
@@ -1708,7 +1539,7 @@ client.on("interactionCreate", async (interaction) => {
     if (approveMatch) {
       const reqId = approveMatch[1];
 
-      // оновлюємо статус у БД → approved
+      // РѕРЅРѕРІР»СЋС”РјРѕ СЃС‚Р°С‚СѓСЃ Сѓ Р‘Р” в†’ approved
       const row = await approveFarmLink(reqId);
       if (!row) {
         return void interaction.reply({
@@ -1717,14 +1548,14 @@ client.on("interactionCreate", async (interaction) => {
         });
       }
 
-      // зробити ферму фермою (цілі = farm)
+      // Р·СЂРѕР±РёС‚Рё С„РµСЂРјСѓ С„РµСЂРјРѕСЋ (С†С–Р»С– = farm)
       await markAsFarmAndRecalcGoals(row.farm_player_id);
 
-      // зібрати дані для DM
+      // Р·С–Р±СЂР°С‚Рё РґР°РЅС– РґР»СЏ DM
       const mainBasic = await fetchPlayerBasic(row.owner_player_id);
       const farmBasic = await fetchPlayerBasic(row.farm_player_id);
 
-      // DM тому хто запросив
+      // DM С‚РѕРјСѓ С…С‚Рѕ Р·Р°РїСЂРѕСЃРёРІ
       const requester = await client.users
         .fetch(row.requested_by_discord_id)
         .catch(() => null);
@@ -1732,13 +1563,13 @@ client.on("interactionCreate", async (interaction) => {
       if (requester) {
         requester
           .send(
-            `✅ Your farm request was APPROVED.\nMain: ${mainBasic?.name} (${mainBasic?.player_id})\nFarm: ${farmBasic?.name} (${farmBasic?.player_id})`
+            `вњ… Your farm request was APPROVED.\nMain: ${mainBasic?.name} (${mainBasic?.player_id})\nFarm: ${farmBasic?.name} (${farmBasic?.player_id})`
           )
           .catch(() => {});
       }
 
       return void interaction.reply({
-        content: `Approved ✅ request #${reqId}`,
+        content: `Approved вњ… request #${reqId}`,
         ephemeral: true,
       });
     }
@@ -1746,7 +1577,7 @@ client.on("interactionCreate", async (interaction) => {
     if (rejectMatch) {
       const reqId = rejectMatch[1];
 
-      // оновлюємо статус у БД → rejected
+      // РѕРЅРѕРІР»СЋС”РјРѕ СЃС‚Р°С‚СѓСЃ Сѓ Р‘Р” в†’ rejected
       const row = await rejectFarmLink(reqId);
       if (!row) {
         return void interaction.reply({
@@ -1755,7 +1586,7 @@ client.on("interactionCreate", async (interaction) => {
         });
       }
 
-      // DM тому хто запросив
+      // DM С‚РѕРјСѓ С…С‚Рѕ Р·Р°РїСЂРѕСЃРёРІ
       const mainBasic = await fetchPlayerBasic(row.owner_player_id);
       const farmBasic = await fetchPlayerBasic(row.farm_player_id);
 
@@ -1766,13 +1597,13 @@ client.on("interactionCreate", async (interaction) => {
       if (requester) {
         requester
           .send(
-            `❌ Your farm request was REJECTED.\nMain: ${mainBasic?.name} (${mainBasic?.player_id})\nFarm: ${farmBasic?.name} (${farmBasic?.player_id})`
+            `вќЊ Your farm request was REJECTED.\nMain: ${mainBasic?.name} (${mainBasic?.player_id})\nFarm: ${farmBasic?.name} (${farmBasic?.player_id})`
           )
           .catch(() => {});
       }
 
       return void interaction.reply({
-        content: `Rejected ❌ request #${reqId}`,
+        content: `Rejected вќЊ request #${reqId}`,
         ephemeral: true,
       });
     }
@@ -1780,23 +1611,22 @@ client.on("interactionCreate", async (interaction) => {
     console.warn("interactionCreate error:", e?.message || e);
     try {
       await interaction.reply({
-        content: "⚠️ Internal error.",
+        content: "вљ пёЏ Internal error.",
         ephemeral: true,
       });
     } catch {}
   }
 });
 
-/* ───────────────── lifecycle ───────────────── */
+
 
 client.once("ready", async () => {
   console.log(`Logged in as ${client.user.tag}`);
 });
 
-// акуратно закриваємо PG pool при виході
 for (const sig of ["SIGINT", "SIGTERM", "SIGQUIT"]) {
   process.on(sig, async () => {
-    console.log(`\n${sig} → closing DB pool...`);
+    console.log(`\n${sig} в†’ closing DB pool...`);
     try {
       await pool.end();
     } catch {}
@@ -1804,10 +1634,10 @@ for (const sig of ["SIGINT", "SIGTERM", "SIGQUIT"]) {
   });
 }
 
-/* ───────────────── запуск ───────────────── */
+
 
 if (!process.env.DISCORD_TOKEN || !process.env.DATABASE_URL) {
-  console.error("❌ DISCORD_TOKEN or DATABASE_URL missing in .env");
+  console.error("вќЊ DISCORD_TOKEN or DATABASE_URL missing in .env");
 }
 
 client.login(process.env.DISCORD_TOKEN); 

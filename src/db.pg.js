@@ -611,6 +611,10 @@ export async function buildStatsCardData(player_id_input) {
   // DKP
   const dkpData = computeDkpProgress(killsDone, deadDone, goalKills, goalDead);
 
+  const killsPct = goalKills > 0 ? (killsDone / goalKills) * 100 : 0;
+  const deadPct  = goalDead  > 0 ? (deadDone  / goalDead)  * 100 : 0;
+  const rolePct  = role === "farm" ? deadPct : killsPct;
+
   // left to go
   const killsLeft = Math.max(0, goalKills - killsDone);
   const deadLeft  = Math.max(0, goalDead  - deadDone);
@@ -688,7 +692,9 @@ export async function buildStatsCardData(player_id_input) {
       dkpDone: dkpData.dkpDone,
       killsLeft,
       deadLeft,
-      pct: dkpData.pct, // це відсоток який показуємо у бейджі і в DKP барі
+      pct: rolePct,
+      killsPct,
+      deadPct,
     },
     lastFight,
     zone: {
@@ -753,6 +759,7 @@ export async function buildTopListData(limit = 10) {
       goalKills,
       goalDead
     );
+    const killsPct = goalKills > 0 ? (killsDone / goalKills) * 100 : 0;
 
     return {
       player_id: r.player_id,
@@ -760,7 +767,7 @@ export async function buildTopListData(limit = 10) {
       updated_at: r.last_update,
       dkpDone: dkpData.dkpDone,
       goal_dkp: dkpData.goal_dkp,
-      pct: dkpData.pct,
+      pct: killsPct,
       killsDone,
       deadDone,
       goal_kills: goalKills,
