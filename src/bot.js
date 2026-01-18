@@ -87,6 +87,26 @@ function checkCooldown(userId) {
   cooldowns.set(userId, now + HEAVY_CMD_COOLDOWN_S * 1000);
   return 0;
 }
+const imgCache = new Map();
+function getCached(key) {
+  const item = imgCache.get(key);
+  if (!item) return null;
+  if (item.exp <= Date.now()) {
+    imgCache.delete(key);
+    return null;
+  }
+  return item.buf;
+}
+function setCached(key, buf) {
+  imgCache.set(key, {
+    buf,
+    exp: Date.now() + IMG_CACHE_TTL_S * 1000,
+  });
+  if (imgCache.size > IMG_CACHE_MAX) {
+    const firstKey = imgCache.keys().next().value;
+    if (firstKey) imgCache.delete(firstKey);
+  }
+}
 function baseCtx(msg) {
   return {
     t: nowIso(),
