@@ -1358,7 +1358,7 @@ client.on("messageCreate", async (msg) => {
         return void msg.reply("Run `!backup` in the admin channel.");
       }
 
-      await msg.channel.send(" Creating full backup (Excel + JSON zip)...");
+      await msg.channel.send("Creating full backup (Excel + JSON zip)...");
       try {
         const { xlsxPath, zipPath } = await exportFullBackup();
 
@@ -1367,16 +1367,16 @@ client.on("messageCreate", async (msg) => {
         try { files.push(new AttachmentBuilder(zipPath)); } catch {}
 
         if (files.length === 0) {
-          return void msg.reply(" Backup created, but files could not be attached (too large?). Check the server `/backups` folder.");
+          return void msg.reply("Backup created, but files could not be attached (too large?). Check the server `/backups` folder.");
         }
 
         await msg.channel.send({
-          content: " Backup ready:",
+          content: "Backup ready:",
           files
         });
       } catch (e) {
         console.error("backup error:", e);
-        await msg.channel.send(" Backup failed: " + (e?.message || e));
+        await msg.channel.send("Backup failed: " + (e?.message || e));
       }
       return;
     }
@@ -1405,19 +1405,19 @@ client.on("messageCreate", async (msg) => {
       );
     }
     return void msg.reply(
-      "Unknown command. See `!help` - This help.
+      "Unknown command. See `!help`."
     );
   } catch (e) {
     log.error({ err: String(e?.stack || e), where: "messageCreate" });
     try {
-      await msg.reply(" Internal error. Admins were notified.");
+      await msg.reply("Internal error. Admins were notified.");
     } catch {}
     const targetId = LOG_CHANNEL_ID || ADMIN_CHANNEL_ID || PUBLIC_CHANNEL_ID;
     const ch = client.channels.cache.get(targetId);
     if (ch && typeof ch.isTextBased === "function" && ch.isTextBased()) {
       ch
         .send(
-          ` Error for message "${msg.content}": \`${String(
+          `Error for message "${msg.content}": \`${String(
             e?.message || e
           )}\``
         )
@@ -1433,13 +1433,13 @@ client.on("interactionCreate", async (interaction) => {
     if (!interaction.isButton()) return;
     if (interaction.channelId !== ADMIN_CHANNEL_ID) {
       return void interaction.reply({
-        content: " Use this in admin channel.",
+        content: "Use this in admin channel.",
         ephemeral: true,
       });
     }
     if (!isAdminMember(interaction.member)) {
       return void interaction.reply({
-        content: " Admins only.",
+        content: "Admins only.",
         ephemeral: true,
       });
     }
@@ -1450,7 +1450,7 @@ client.on("interactionCreate", async (interaction) => {
 
     if (!approveMatch && !rejectMatch) {
       return void interaction.reply({
-        content: " Unknown button.",
+        content: "Unknown button.",
         ephemeral: true,
       });
     }
@@ -1518,7 +1518,7 @@ client.on("interactionCreate", async (interaction) => {
     console.warn("interactionCreate error:", e?.message || e);
     try {
       await interaction.reply({
-        content: " Internal error.",
+        content: "Internal error.",
         ephemeral: true,
       });
     } catch {}
@@ -1544,7 +1544,7 @@ for (const sig of ["SIGINT", "SIGTERM", "SIGQUIT"]) {
 
 
 if (!process.env.DISCORD_TOKEN || !process.env.DATABASE_URL) {
-  console.error(" DISCORD_TOKEN or DATABASE_URL missing in .env");
+  console.error("DISCORD_TOKEN or DATABASE_URL missing in .env");
 }
 
 client.login(process.env.DISCORD_TOKEN); 
