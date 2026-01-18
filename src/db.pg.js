@@ -234,6 +234,22 @@ export async function getActiveKvK() {
   return rows[0]?.kvk_id || null;
 }
 
+export async function endActiveKvK() {
+  const { rows } = await pool.query(`
+    UPDATE kvk_sessions
+       SET ended_at = now()
+     WHERE kvk_id = (
+       SELECT kvk_id
+       FROM kvk_sessions
+       WHERE ended_at IS NULL
+       ORDER BY kvk_id DESC
+       LIMIT 1
+     )
+     RETURNING kvk_id
+  `);
+  return rows[0]?.kvk_id || null;
+}
+
 /* ───────────────── baseline з OCR ─────────────────
    upsertBaselineFromOCR(kvk_id, scanRow)
    scanRow = {
@@ -883,6 +899,39 @@ export async function rejectFarmLink(requestId) {
     [String(requestId)]
   );
   return rows[0] || null;
+}
+
+export async function setFarmLinkApproved(ownerId, farmId) {
+  const { rows } = await pool.query(
+    `
+    INSERT INTO account_links(
+      owner_player_id,
+      farm_player_id,
+      status,
+      requested_by_discord_id,
+      requested_at,
+      resolved_at
+    )
+    VALUES ($1,$2,'approved','adminpanel',now(),now())
+    ON CONFLICT (farm_player_id)
+    DO UPDATE SET
+      owner_player_id = EXCLUDED.owner_player_id,
+      status = 'approved',
+      requested_by_discord_id = EXCLUDED.requested_by_discord_id,
+      requested_at = now(),
+      resolved_at = now()
+    RETURNING request_id, owner_player_id, farm_player_id
+    `,
+    [String(ownerId), String(farmId)]
+  );
+  return rows[0] || null;
+}
+
+export async function removeFarmLink(farmId) {
+  await pool.query(
+    `DELETE FROM account_links WHERE farm_player_id=$1`,
+    [String(farmId)]
+  );
 }
 
 /* ───────────────── закрити пул ───────────────── */
