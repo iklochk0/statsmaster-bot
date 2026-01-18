@@ -77,6 +77,16 @@ const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
 function nowIso() {
   return new Date().toISOString();
 }
+const cooldowns = new Map();
+function checkCooldown(userId) {
+  const now = Date.now();
+  const until = cooldowns.get(userId) || 0;
+  if (now < until) {
+    return Math.ceil((until - now) / 1000);
+  }
+  cooldowns.set(userId, now + HEAVY_CMD_COOLDOWN_S * 1000);
+  return 0;
+}
 function baseCtx(msg) {
   return {
     t: nowIso(),
