@@ -201,7 +201,7 @@ function playerCardSVG(bundle) {
   const barH       = 32;
   const barGapY    = 90;
   const barsStartY = metricsY + 110;
-  const numBars = player.role === "farm" ? 1 : 2;
+  const numBars = player.role === "farm" ? 2 : 3;
   const farmsStartY = barsStartY + (barGapY * numBars) + 50;
   let bottomYBase = barsStartY + (barGapY * numBars) + 50;
 
@@ -359,11 +359,14 @@ function playerCardSVG(bundle) {
                       "WARM UP";
   let barsSvg = "";
   if (player.role === "farm") {
-    barsSvg = makeBar("Dead", progress.deadDone, goals.dead, 0);
+    barsSvg =
+      makeBar("Kill Points", progress.kpDone, goals.kp, 0) +
+      makeBar("Dead", progress.deadDone, goals.dead, barGapY);
   } else {
     barsSvg =
-      makeBar("Kills (T4+T5)", progress.killsDone, goals.kills, 0) +
-      makeBar("Dead", progress.deadDone, goals.dead, barGapY);
+      makeBar("Kill Points", progress.kpDone, goals.kp, 0) +
+      makeBar("Kills (T4+T5)", progress.killsDone, goals.kills, barGapY) +
+      makeBar("Dead", progress.deadDone, goals.dead, barGapY * 2);
   }
 
   // LEFT TO GO
@@ -645,7 +648,7 @@ async function renderPlayerCardPNG(bundle) {
 
 function hashTopRows(rows) {
   const s = rows
-    .map((r) => `${r.player_id}:${r.killsDone}:${r.goal_kills}:${r.pct}`)
+    .map((r) => `${r.player_id}:${r.kpDone}:${r.goal_kp}:${r.pct}`)
     .join("|");
   return createHash("md5").update(s).digest("hex").slice(0, 12);
 }
@@ -683,6 +686,7 @@ function kvkTopSVG(rows, meta = {}) {
 
   const nfNum = (n) => Number(n ?? 0).toLocaleString("en-US");
   const isKillsView = meta.sortBy === "kills";
+  const isKpView = meta.sortBy === "kp";
   const pctNoRound = (v) => {
     const n = Number(v);
     if (!Number.isFinite(n)) return "0";
@@ -732,9 +736,13 @@ function kvkTopSVG(rows, meta = {}) {
     const yTop = listTopY + idx * rowGap;
     const killsDone = Number(r.killsDone) || 0;
     const goalKills = Number(r.goal_kills) || 0;
+    const kpDone = Number(r.kpDone) || 0;
+    const goalKp = Number(r.goal_kp) || 0;
     const pctRaw = isKillsView
       ? (goalKills > 0 ? (killsDone / goalKills) * 100 : 0)
-      : (Number(r.pct) || 0);
+      : isKpView
+        ? (goalKp > 0 ? (kpDone / goalKp) * 100 : 0)
+        : (Number(r.pct) || 0);
     const { wBase, wOver } = barPieces(pctRaw);
 
     const playerName = (r.name && r.name.trim())
@@ -745,13 +753,12 @@ function kvkTopSVG(rows, meta = {}) {
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;");
-    const visDkpGoal = 10000;
-    const visDkpDone = Math.round(((Number(r.pct) || 0) / 100) * visDkpGoal);
-
     const bottomLeftText = isKillsView
       ? `Kills ${nfNum(killsDone)} / ${nfNum(goalKills)}`
-      : `${nfNum(visDkpDone)} / ${nfNum(visDkpGoal)}`;
-    const bottomRightText = isKillsView
+      : isKpView
+        ? `KP ${nfNum(kpDone)} / ${nfNum(goalKp)}`
+        : `${nfNum(kpDone)} / ${nfNum(goalKp)}`;
+    const bottomRightText = isKillsView || isKpView
       ? `${pctNoRound(pctRaw)}%`
       : `${Math.round(pctRaw)}%`;
     const rankText = `${idx + 1}.`;
@@ -1044,7 +1051,7 @@ client.on("messageCreate", async (msg) => {
       const cacheKey = [
         "p",
         idArg,
-        bundle.progress.dkpDone,
+        bundle.progress.kpDone,
         bundle.progress.killsDone,
         bundle.progress.deadDone,
         bundle.progress.killsLeft,
@@ -1089,7 +1096,7 @@ client.on("messageCreate", async (msg) => {
       const cacheKey = [
         "p",
         linked,
-        bundle.progress.dkpDone,
+        bundle.progress.kpDone,
         bundle.progress.killsDone,
         bundle.progress.deadDone,
         bundle.progress.killsLeft,
@@ -1279,7 +1286,7 @@ client.on("messageCreate", async (msg) => {
         "**Admin commands:**",
         "`!helpadmin`  this list.",
         "`!kvk start [name]`  start new KvK session (admin channel only).",
-        "`!top [N] [text]`  KvK leaderboard (Kills%).",
+        "`!top [N] [text]`  KvK leaderboard (KP%).",
         "`!topkills [N] [text]`  KvK leaderboard (kills%).",
         "`!link @user <player_id>`  Link mentioned user to player.",
         "`!unlink [@user]`  Unlink mentioned user.",
@@ -1313,8 +1320,8 @@ client.on("messageCreate", async (msg) => {
 
       if (asText) {
         const lines = rows.map((r, i) => {
-          const killsPct = pct1NoRound(r.pct);
-          return `**${i + 1}.** ${r.name ?? r.player_id} - ${killsPct}% (Kills ${nf(r.killsDone)}/${nf(r.goal_kills)})`;
+          const kpPct = pct1NoRound(r.pct);
+          return `**${i + 1}.** ${r.name ?? r.player_id} - ${kpPct}% (KP ${nf(r.kpDone)}/${nf(r.goal_kp)})`;
         });
         return void msg.reply(lines.join("\n"));
       }
@@ -1322,9 +1329,9 @@ client.on("messageCreate", async (msg) => {
         rows.map((r) => r.player_id).filter(Boolean)
       );
       const meta = {
-        title: `KvK Top ${rows.length} by Kills`,
+        title: `KvK Top ${rows.length} by KP`,
         updated: formatTs(ts),
-        sortBy: "kills",
+        sortBy: "kp",
       };
 
       const cacheKey = `top:${limit}:${hashTopRows(rows)}`;

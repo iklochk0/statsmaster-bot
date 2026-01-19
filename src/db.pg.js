@@ -613,11 +613,14 @@ export async function buildStatsCardData(player_id_input) {
 
   const killsPct = goalKills > 0 ? (killsDone / goalKills) * 100 : 0;
   const deadPct  = goalDead  > 0 ? (deadDone  / goalDead)  * 100 : 0;
-  const rolePct  = role === "farm" ? deadPct : killsPct;
+  const avgKpPerKill = killsDone > 0 ? dKP / killsDone : 4;
+  const kpGoal = goalKills > 0 ? Math.round(goalKills * avgKpPerKill) : 0;
+  const kpPct = kpGoal > 0 ? (dKP / kpGoal) * 100 : 0;
 
   // left to go
   const killsLeft = Math.max(0, goalKills - killsDone);
   const deadLeft  = Math.max(0, goalDead  - deadDone);
+  const kpLeft    = Math.max(0, kpGoal - dKP);
 
   // остання бойова зона
   const { rows: lastZoneRows } = await pool.query(
@@ -685,14 +688,18 @@ export async function buildStatsCardData(player_id_input) {
       kills: goalKills,
       dead: goalDead,
       dkp: dkpData.goal_dkp,
+      kp: kpGoal,
     },
     progress: {
       killsDone,
       deadDone,
       dkpDone: dkpData.dkpDone,
+      kpDone: dKP,
       killsLeft,
       deadLeft,
-      pct: rolePct,
+      kpLeft,
+      pct: kpPct,
+      kpPct,
       killsPct,
       deadPct,
     },
@@ -724,7 +731,8 @@ export async function buildTopListData(limit = 10) {
       g.goal_kills,
       g.goal_dead,
       COALESCE(SUM(i.t4_kills + i.t5_kills), 0) AS killsdone,
-      COALESCE(SUM(i.dead), 0)                 AS deaddone
+      COALESCE(SUM(i.dead), 0)                 AS deaddone,
+      COALESCE(SUM(i.kp), 0)                   AS kpdone
     FROM kvk_goals g
     JOIN players p
       ON p.player_id = g.player_id
@@ -753,21 +761,18 @@ export async function buildTopListData(limit = 10) {
     const goalKills = toNum(r.goal_kills, 0);
     const goalDead  = toNum(r.goal_dead, 0);
 
-    const dkpData = computeDkpProgress(
-      killsDone,
-      deadDone,
-      goalKills,
-      goalDead
-    );
-    const killsPct = goalKills > 0 ? (killsDone / goalKills) * 100 : 0;
+    const kpDone = toNum(r.kpdone, 0);
+    const avgKpPerKill = killsDone > 0 ? kpDone / killsDone : 4;
+    const kpGoal = goalKills > 0 ? Math.round(goalKills * avgKpPerKill) : 0;
+    const kpPct = kpGoal > 0 ? (kpDone / kpGoal) * 100 : 0;
 
     return {
       player_id: r.player_id,
       name: r.name,
       updated_at: r.last_update,
-      dkpDone: dkpData.dkpDone,
-      goal_dkp: dkpData.goal_dkp,
-      pct: killsPct,
+      kpDone,
+      goal_kp: kpGoal,
+      pct: kpPct,
       killsDone,
       deadDone,
       goal_kills: goalKills,
