@@ -190,23 +190,23 @@ function playerCardSVG(bundle) {
   const badCol      = "#ef5350";
   const zeroCol     = "#7b8193";
   const w = 1100;
-  let h = 760;
+  let h = 700;
   const padX   = 24;
-  const padTop = 40;
+  const padTop = 52;
 
-  const metricsY        = padTop + 70;
+  const metricsY        = padTop + 60;
   const metricBlockGapX = 200;
 
   const barW       = w - padX * 2;
   const barH       = 24;
   const barGapY    = 80;
-  const barsStartY = metricsY + 100;
+  const barsStartY = metricsY + 90;
   const numBars = 1;
   const farmsStartY = barsStartY + (barGapY * numBars) + 40;
   let bottomYBase = barsStartY + (barGapY * numBars) + 40;
 
   const leftBoxW   = 500;
-  const leftBoxH   = 70;
+  const leftBoxH   = 60;
   const leftBoxR   = 8;
 
   // Updated
@@ -238,6 +238,14 @@ function playerCardSVG(bundle) {
   const dT5    = renderDelta(deltas.t5);
   const dT4    = renderDelta(deltas.t4);
   const showDeadMetric = true;
+  const dailyKillsRaw =
+    (Number(deltas.t4) || 0) + (Number(deltas.t5) || 0);
+  const dailyKillsText =
+    dailyKillsRaw === 0
+      ? "0"
+      : dailyKillsRaw > 0
+        ? `+${nfNum(dailyKillsRaw)}`
+        : `-${nfNum(Math.abs(dailyKillsRaw))}`;
   function progressPieces(done, goal, totalW) {
     if (!goal || goal <= 0) {
       return { wBase: 0, wOver: 0, pctRaw: 0 };
@@ -353,7 +361,12 @@ function playerCardSVG(bundle) {
   if (player.role === "farm") {
     barsSvg = makeBar("Dead", progress.deadDone, goals.dead, 0);
   } else {
-    barsSvg = makeBar("Kills (T4+T5)", progress.killsDone, goals.kills, 0);
+    barsSvg = makeBar(
+      `Kills (T4+T5) ${dailyKillsText}/day`,
+      progress.killsDone,
+      goals.kills,
+      0
+    );
   }
 
   // LEFT TO GO
@@ -392,7 +405,7 @@ function playerCardSVG(bundle) {
     `;
     bottomYBase = farmsStartY + farmCount * barGapY + 40;
   }
-  h = Math.max(h, bottomYBase + leftBoxH + 60);
+  h = Math.max(h, bottomYBase + leftBoxH + 50);
   const hasLastFightData =
     lastFight &&
     lastFight.zoneName &&
@@ -435,13 +448,14 @@ function playerCardSVG(bundle) {
           0
         )
       : 0;
+  const canShowFarmTotal = player.role === "main" && farmCount > 0;
   const summaryTitle =
     player.role === "main" ? "FARM DEADS (TOTAL)" : "DEAD DONE";
   const summaryValue =
     player.role === "main"
       ? (farmDeadTotal > 0 ? nfNum(farmDeadTotal) : "-")
       : nfNum(progress.deadDone);
-  const summaryBox = !hasLastFightData
+  const summaryBox = !hasLastFightData && (canShowFarmTotal || player.role === "farm")
     ? `
       <g transform="translate(${padX + leftBoxW + 24}, ${bottomYBase})">
         <text x="0" y="0"
