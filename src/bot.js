@@ -190,23 +190,23 @@ function playerCardSVG(bundle) {
   const badCol      = "#ef5350";
   const zeroCol     = "#7b8193";
   const w = 1100;
-  let h = 700;
+  let h = 820;
   const padX   = 24;
-  const padTop = 52;
+  const padTop = 60;
 
-  const metricsY        = padTop + 60;
+  const metricsY        = padTop + 90;
   const metricBlockGapX = 200;
 
   const barW       = w - padX * 2;
   const barH       = 24;
-  const barGapY    = 80;
-  const barsStartY = metricsY + 90;
+  const barGapY    = 110;
+  const barsStartY = metricsY + 140;
   const numBars = 1;
-  const farmsStartY = barsStartY + (barGapY * numBars) + 40;
-  let bottomYBase = barsStartY + (barGapY * numBars) + 40;
+  const farmsStartY = barsStartY + (barGapY * numBars) + 70;
+  let bottomYBase = barsStartY + (barGapY * numBars) + 70;
 
   const leftBoxW   = 500;
-  const leftBoxH   = 60;
+  const leftBoxH   = 78;
   const leftBoxR   = 8;
 
   // Updated
@@ -405,7 +405,7 @@ function playerCardSVG(bundle) {
     `;
     bottomYBase = farmsStartY + farmCount * barGapY + 40;
   }
-  h = Math.max(h, bottomYBase + leftBoxH + 50);
+  h = Math.max(h, bottomYBase + leftBoxH + 80);
   const hasLastFightData =
     lastFight &&
     lastFight.zoneName &&
