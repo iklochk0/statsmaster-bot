@@ -237,7 +237,7 @@ function playerCardSVG(bundle) {
   const dDead  = renderDelta(deltas.dead);
   const dT5    = renderDelta(deltas.t5);
   const dT4    = renderDelta(deltas.t4);
-  const showDeadMetric = player.role === "farm";
+  const showDeadMetric = true;
   function progressPieces(done, goal, totalW) {
     if (!goal || goal <= 0) {
       return { wBase: 0, wOver: 0, pctRaw: 0 };
@@ -428,6 +428,48 @@ function playerCardSVG(bundle) {
     `
     : "";
 
+  const farmDeadTotal =
+    farmCount > 0
+      ? farms.farms.reduce(
+          (sum, f) => sum + (Number(f.deadDone) || 0),
+          0
+        )
+      : 0;
+  const summaryTitle =
+    player.role === "main" ? "FARM DEADS (TOTAL)" : "DEAD DONE";
+  const summaryValue =
+    player.role === "main"
+      ? (farmDeadTotal > 0 ? nfNum(farmDeadTotal) : "-")
+      : nfNum(progress.deadDone);
+  const summaryBox = !hasLastFightData
+    ? `
+      <g transform="translate(${padX + leftBoxW + 24}, ${bottomYBase})">
+        <text x="0" y="0"
+              font-family="Inter, system-ui"
+              font-size="14"
+              fill="${subCol}"
+              font-weight="500">
+          ${summaryTitle}
+        </text>
+
+        <rect x="0" y="16"
+              width="${leftBoxW}" height="${leftBoxH}"
+              rx="${leftBoxR}"
+              fill="${panelBg}"/>
+
+        <text x="16" y="52"
+              font-family="Inter, system-ui"
+              font-size="18"
+              fill="${textCol}"
+              font-weight="500">
+          ${summaryValue}
+        </text>
+      </g>
+    `
+    : "";
+
+  const rightBox = hasLastFightData ? lastFightBox : summaryBox;
+
   return `
 <svg xmlns="http://www.w3.org/2000/svg"
      width="${w}" height="${h}"
@@ -575,7 +617,7 @@ function playerCardSVG(bundle) {
     </text>
   </g>
 
-  ${lastFightBox}
+  ${rightBox}
   ${farmsSvg}
 
 </svg>
