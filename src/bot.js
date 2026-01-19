@@ -189,24 +189,24 @@ function playerCardSVG(bundle) {
   const goodCol     = "#6ee7a8";
   const badCol      = "#ef5350";
   const zeroCol     = "#7b8193";
-  const w = 1100;
-  let h = 820;
+  const w = 1200;
+  let h = 760;
   const padX   = 24;
   const padTop = 60;
 
-  const metricsY        = padTop + 90;
+  const metricsY        = padTop + 80;
   const metricBlockGapX = 200;
 
   const barW       = w - padX * 2;
-  const barH       = 24;
-  const barGapY    = 110;
-  const barsStartY = metricsY + 140;
+  const barH       = 28;
+  const barGapY    = 90;
+  const barsStartY = metricsY + 110;
   const numBars = 1;
-  const farmsStartY = barsStartY + (barGapY * numBars) + 70;
-  let bottomYBase = barsStartY + (barGapY * numBars) + 70;
+  const farmsStartY = barsStartY + (barGapY * numBars) + 50;
+  let bottomYBase = barsStartY + (barGapY * numBars) + 50;
 
   const leftBoxW   = 500;
-  const leftBoxH   = 78;
+  const leftBoxH   = 70;
   const leftBoxR   = 8;
 
   // Updated
@@ -405,7 +405,7 @@ function playerCardSVG(bundle) {
     `;
     bottomYBase = farmsStartY + farmCount * barGapY + 40;
   }
-  h = Math.max(h, bottomYBase + leftBoxH + 80);
+  h = Math.max(h, bottomYBase + leftBoxH + 60);
   const hasLastFightData =
     lastFight &&
     lastFight.zoneName &&
@@ -524,14 +524,14 @@ function playerCardSVG(bundle) {
     }
     .barLabel {
       fill:${textCol};
-      font-size:14px;
-      font-weight:500;
+      font-size:16px;
+      font-weight:600;
       font-family:Inter, system-ui;
     }
     .barText {
       fill:${textCol};
-      font-size:14px;
-      font-weight:500;
+      font-size:15px;
+      font-weight:600;
       font-family:Inter, system-ui;
       text-anchor:middle;
     }
