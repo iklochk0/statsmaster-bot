@@ -201,7 +201,7 @@ function playerCardSVG(bundle) {
   const barH       = 32;
   const barGapY    = 90;
   const barsStartY = metricsY + 110;
-  const numBars = 1;
+  const numBars = player.role === "farm" ? 1 : 2;
   const farmsStartY = barsStartY + (barGapY * numBars) + 50;
   let bottomYBase = barsStartY + (barGapY * numBars) + 50;
 
@@ -361,7 +361,9 @@ function playerCardSVG(bundle) {
   if (player.role === "farm") {
     barsSvg = makeBar("Dead", progress.deadDone, goals.dead, 0);
   } else {
-    barsSvg = makeBar("Kills (T4+T5)", progress.killsDone, goals.kills, 0);
+    barsSvg =
+      makeBar("Kills (T4+T5)", progress.killsDone, goals.kills, 0) +
+      makeBar("Dead", progress.deadDone, goals.dead, barGapY);
   }
 
   // LEFT TO GO
