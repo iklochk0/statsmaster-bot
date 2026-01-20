@@ -414,7 +414,8 @@ function levelRectForRow(i) {
   const safeBottom = SAFE.top + SAFE.height;
 
   if (Number.isFinite(col.top0)) {
-    const dy = rowRefY(i) - rowRefY(0);
+    const refIdx = Number.isFinite(col.refRowIndex) ? col.refRowIndex : 0;
+    const dy = rowRefY(i) - rowRefY(refIdx);
     const top = clamp(Math.round(col.top0 + dy), safeTop, safeBottom - height);
     return { left, top, width, height };
   }
@@ -1101,12 +1102,9 @@ async function main() {
   }
 
   // Етап 1: пройти верх списку до BASE_ROW_IDX-1 (тобто 0,1,2)
-  for (
-    let i = 0;
-    i < Math.min(BASE_ROW_IDX, LIST.rows.length) && visited < COUNT;
-    i++
-  ) {
-    if (visited > 0) break;
+  const stage1Limit = Math.min(BASE_ROW_IDX, LIST.rows.length);
+  const stage1Start = Math.min(visited, stage1Limit);
+  for (let i = stage1Start; i < stage1Limit && visited < COUNT; i++) {
     await maybeIdlePause();
 
     // якщо це не останній рядок пачки — перевіримо що там City Hall == 25

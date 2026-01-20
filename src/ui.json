@@ -21,12 +21,12 @@
       { "rect": { "left": 145, "top": 615, "width": 970, "height": 55 } }
     ],
 
-    "levelCol": { "left": 980, "width": 65, "height": 45, "top0": 210 },
-    "levelCol0": { "left": 980, "width": 65, "height": 45, "top0": 210, "refRowIndex": 0 },
+    "levelCol": { "left": 980, "width": 65, "height": 45, "top0": 200 },
+    "levelCol0": { "left": 980, "width": 65, "height": 45, "top0": 200, "refRowIndex": 0 },
     "levelCol1": { "left": 980, "width": 65, "height": 45, "top0": 280, "refRowIndex": 1 },
-    "levelCol2": { "left": 980, "width": 65, "height": 45, "top0": 360, "refRowIndex": 2 },
-    "levelCol3": { "left": 980, "width": 65, "height": 45, "top0": 440, "refRowIndex": 3 },
-    "levelCol4": { "left": 980, "width": 65, "height": 45, "top0": 470, "refRowIndex": 4 },
+    "levelCol2": { "left": 980, "width": 65, "height": 45, "top0": 362, "refRowIndex": 2 },
+    "levelCol3": { "left": 980, "width": 65, "height": 45, "top0": 442, "refRowIndex": 3 },
+    "levelCol4": { "left": 980, "width": 65, "height": 45, "top0": 460, "refRowIndex": 4 },
     "levelCol5": { "left": 980, "width": 65, "height": 45, "top0": 540, "refRowIndex": 5 },
     "levelCol6": { "left": 980, "width": 65, "height": 45, "top0": 620, "refRowIndex": 6 },
 
