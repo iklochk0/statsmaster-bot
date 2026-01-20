@@ -137,6 +137,19 @@ function channelAllowed(msg) {
   return channelId === PUBLIC_CHANNEL_ID || channelId === ADMIN_CHANNEL_ID;
 }
 
+function isAdminMember(member) {
+  if (!member) return false;
+  if (member.permissions?.has(PermissionsBitField.Flags.Administrator)) {
+    return true;
+  }
+  if (!ADMIN_ROLE_IDS.length) return false;
+  return member.roles?.cache?.some((r) => ADMIN_ROLE_IDS.includes(r.id)) || false;
+}
+
+function isAdmin(msg) {
+  return isAdminMember(msg.member);
+}
+
 function formatTs(tsLike) {
   if (!tsLike) return "-";
   const d = new Date(tsLike);
