@@ -404,7 +404,7 @@ function playerCardSVG(bundle) {
           My Farms
         </text>
 
-        <g transform="translate(0,24)">
+        <g transform="translate(0,32)">
           ${farmBars}
         </g>
       </g>
