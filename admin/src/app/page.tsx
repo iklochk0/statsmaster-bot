@@ -23,6 +23,17 @@ export default function Home() {
   const [wipeConfirm, setWipeConfirm] = useState("");
   const [resetClearGoals, setResetClearGoals] = useState(true);
   const [resetClearImports, setResetClearImports] = useState(true);
+  const [playerForm, setPlayerForm] = useState({
+    playerId: "",
+    name: "",
+    power: "",
+    kp: "",
+    dead: "",
+    t4: "",
+    t5: "",
+    lastUpdate: "",
+  });
+  const [playerStatus, setPlayerStatus] = useState("");
 
   useEffect(() => {
     const stored = localStorage.getItem("adminPin");
@@ -179,6 +190,58 @@ export default function Home() {
     setBusy(null);
   }
 
+  function setPlayerField(key: keyof typeof playerForm, value: string) {
+    setPlayerForm((prev) => ({ ...prev, [key]: value }));
+  }
+
+  async function loadPlayer() {
+    const id = playerForm.playerId.trim();
+    if (!id) {
+      setPlayerStatus("Enter player_id first.");
+      return;
+    }
+    setBusy("player");
+    const data = await jpost<ApiResult<any>>("/api/players/get", { playerId: id });
+    if (data.ok && data.result) {
+      setPlayerForm({
+        playerId: String(data.result.player_id ?? id),
+        name: data.result.name ?? "",
+        power: String(data.result.power_current ?? 0),
+        kp: String(data.result.kp_current ?? 0),
+        dead: String(data.result.dead_current ?? 0),
+        t4: String(data.result.t4_kills_current ?? 0),
+        t5: String(data.result.t5_kills_current ?? 0),
+        lastUpdate: data.result.last_update ? String(data.result.last_update) : "",
+      });
+      setPlayerStatus("Player loaded.");
+    } else {
+      setPlayerStatus(`Load failed: ${data.error}`);
+    }
+    setBusy(null);
+  }
+
+  async function savePlayer() {
+    const id = playerForm.playerId.trim();
+    if (!id) {
+      setPlayerStatus("player_id is required.");
+      return;
+    }
+    setBusy("player");
+    const data = await jpost<ApiResult<any>>("/api/players/upsert", {
+      player_id: id,
+      name: playerForm.name,
+      power_current: playerForm.power,
+      kp_current: playerForm.kp,
+      dead_current: playerForm.dead,
+      t4_kills_current: playerForm.t4,
+      t5_kills_current: playerForm.t5,
+      last_update: playerForm.lastUpdate || null,
+    });
+    setPlayerStatus(data.ok ? "Player saved." : `Save failed: ${data.error}`);
+    await refreshStatus();
+    setBusy(null);
+  }
+
   useEffect(() => {
     refreshStatus().catch(() => {});
   }, []);
@@ -265,6 +328,81 @@ export default function Home() {
               <div className="mono">zip: {backupInfo.zipPath}</div>
             </div>
           )}
+        </div>
+
+        <div className="card">
+          <h2>Players</h2>
+          <div className="row">
+            <input
+              type="text"
+              placeholder="player_id"
+              value={playerForm.playerId}
+              onChange={(e) => setPlayerField("playerId", e.target.value)}
+            />
+            <button onClick={loadPlayer} disabled={busy === "player"}>
+              Load
+            </button>
+            <button onClick={savePlayer} disabled={busy === "player"}>
+              Save
+            </button>
+          </div>
+          <div className="row">
+            <input
+              type="text"
+              placeholder="name"
+              value={playerForm.name}
+              onChange={(e) => setPlayerField("name", e.target.value)}
+            />
+          </div>
+          <div className="row">
+            <input
+              type="text"
+              placeholder="power_current"
+              value={playerForm.power}
+              onChange={(e) => setPlayerField("power", e.target.value)}
+            />
+            <input
+              type="text"
+              placeholder="kp_current"
+              value={playerForm.kp}
+              onChange={(e) => setPlayerField("kp", e.target.value)}
+            />
+            <input
+              type="text"
+              placeholder="dead_current"
+              value={playerForm.dead}
+              onChange={(e) => setPlayerField("dead", e.target.value)}
+            />
+          </div>
+          <div className="row">
+            <input
+              type="text"
+              placeholder="t4_kills_current"
+              value={playerForm.t4}
+              onChange={(e) => setPlayerField("t4", e.target.value)}
+            />
+            <input
+              type="text"
+              placeholder="t5_kills_current"
+              value={playerForm.t5}
+              onChange={(e) => setPlayerField("t5", e.target.value)}
+            />
+          </div>
+          <div className="row">
+            <input
+              type="text"
+              placeholder="last_update (ISO, optional)"
+              value={playerForm.lastUpdate}
+              onChange={(e) => setPlayerField("lastUpdate", e.target.value)}
+            />
+            <button
+              onClick={() => setPlayerField("lastUpdate", new Date().toISOString())}
+              disabled={busy === "player"}
+            >
+              Now
+            </button>
+          </div>
+          {playerStatus ? <p className="muted">{playerStatus}</p> : null}
         </div>
 
         <div className="card">

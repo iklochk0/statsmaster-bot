@@ -938,6 +938,67 @@ export async function rejectFarmLink(requestId) {
   return rows[0] || null;
 }
 
+export async function upsertPlayerManual(input) {
+  const pid = String(input?.player_id || "").trim();
+  if (!/^\d+$/.test(pid)) {
+    throw new Error("player_id must be numeric");
+  }
+  const name = String(input?.name || "").trim();
+  const power_current = toNum(input?.power_current, 0);
+  const kp_current = toNum(input?.kp_current, 0);
+  const dead_current = toNum(input?.dead_current, 0);
+  const t4_kills_current = toNum(input?.t4_kills_current, 0);
+  const t5_kills_current = toNum(input?.t5_kills_current, 0);
+  const last_update = input?.last_update
+    ? new Date(input.last_update)
+    : new Date();
+
+  await pool.query(
+    `
+    INSERT INTO players (
+      player_id,
+      name,
+      power_current,
+      kp_current,
+      dead_current,
+      t4_kills_current,
+      t5_kills_current,
+      last_update
+    )
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+    ON CONFLICT (player_id) DO UPDATE SET
+      name=EXCLUDED.name,
+      power_current=EXCLUDED.power_current,
+      kp_current=EXCLUDED.kp_current,
+      dead_current=EXCLUDED.dead_current,
+      t4_kills_current=EXCLUDED.t4_kills_current,
+      t5_kills_current=EXCLUDED.t5_kills_current,
+      last_update=EXCLUDED.last_update
+    `,
+    [
+      pid,
+      name,
+      power_current,
+      kp_current,
+      dead_current,
+      t4_kills_current,
+      t5_kills_current,
+      last_update.toISOString(),
+    ]
+  );
+
+  return {
+    player_id: pid,
+    name,
+    power_current,
+    kp_current,
+    dead_current,
+    t4_kills_current,
+    t5_kills_current,
+    last_update: last_update.toISOString(),
+  };
+}
+
 export async function setFarmLinkApproved(ownerId, farmId) {
   const { rows } = await pool.query(
     `
