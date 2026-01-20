@@ -81,7 +81,7 @@ const SAFE = UI.screen?.safe ?? {
 
 // як ми перевіряємо що ми реально в списку City Hall
 const ANCHOR_CITYHALL =
-  UI.anchors?.cityHall ?? { left: 520, top: 110, width: 260, height: 60 };
+  UI.anchors?.cityHall ?? { left: 420, top: 20, width: 450, height: 45 };
 
 /* ──────────────────────── Timings / humanization ──────────────────────── */
 
