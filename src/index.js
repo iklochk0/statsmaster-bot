@@ -396,7 +396,11 @@ function rowRefY(i) {
 }
 
 function levelRectForRow(i) {
-  const col = LIST.levelCol;
+  const col =
+    LIST[`levelCol${i}`] ||
+    (LIST.levelCol4 && Number.isFinite(LIST.levelCol4.refRowIndex) && i >= LIST.levelCol4.refRowIndex
+      ? LIST.levelCol4
+      : LIST.levelCol);
   if (!col?.left || !col?.width || !col?.height) {
     throw new Error("ui.cityHallList.levelCol missing left/width/height");
   }
@@ -902,7 +906,10 @@ async function alignBaseRowToExpectedRank(expectedRank) {
 
 async function verifyTopRowsLevel(expected = 25, maxRow = BASE_ROW_IDX) {
   for (let i = 0; i <= maxRow && i < LIST.rows.length; i++) {
-    const lvl = await readLevelAtRow(i);
+    let lvl = await readLevelAtRow(i);
+    if (lvl !== expected) {
+      lvl = await readLevelAtRow(i);
+    }
     if (lvl !== expected) {
       console.log(`   Stop: row ${i} CH=${Number.isNaN(lvl) ? "?" : lvl}`);
       logAction("stop-bad-level", { idx: i, lvl });
@@ -1083,7 +1090,9 @@ async function main() {
   const state = await loadScanState(statePath);
   if (state?.lastVisited && Number.isFinite(state.lastVisited)) {
     visited = Math.max(0, Number(state.lastVisited));
-    const expectedRank = visited + 1;
+    const expectedRank = Number.isFinite(state.lastRankSeen)
+      ? Number(state.lastRankSeen)
+      : visited + 1;
     await alignBaseRowToExpectedRank(expectedRank);
   }
 
@@ -1132,7 +1141,8 @@ async function main() {
     }
 
     visited++;
-    await saveScanState(statePath, { lastVisited: visited });
+    const lastRankSeen = await readRankAtRow(BASE_ROW_IDX);
+    await saveScanState(statePath, { lastVisited: visited, lastRankSeen });
     await humanPause();
     await maybeIdlePause();
   }
@@ -1165,7 +1175,8 @@ async function main() {
     }
 
     visited++;
-    await saveScanState(statePath, { lastVisited: visited });
+    const lastRankSeen = await readRankAtRow(BASE_ROW_IDX);
+    await saveScanState(statePath, { lastVisited: visited, lastRankSeen });
     await humanPause();
     await maybeIdlePause();
 
