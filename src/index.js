@@ -142,9 +142,13 @@ const jitterPx = (v) => v + randInt(-RAND_PX, RAND_PX);
 const jitterDur = (ms = 120) => Math.max(60, ms + randInt(-30, 30));
 
 const ACTION_LOG = [];
+const ACTION_LOG_MAX = Number(process.env.ACTION_LOG_MAX || 2000);
 function logAction(type, detail = {}) {
   const entry = { at: new Date().toISOString(), type, ...detail };
   ACTION_LOG.push(entry);
+  if (ACTION_LOG.length > ACTION_LOG_MAX) {
+    ACTION_LOG.splice(0, ACTION_LOG.length - ACTION_LOG_MAX);
+  }
   const preview = JSON.stringify(detail);
   console.log(
     `[ACTION] ${type} ${
