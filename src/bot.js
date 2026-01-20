@@ -398,13 +398,13 @@ function playerCardSVG(bundle) {
       <g transform="translate(${padX},${farmsStartY})">
         <text x="0" y="0"
               font-family="Inter, system-ui"
-              font-size="14"
-              fill="${subCol}"
-              font-weight="500">
+              font-size="16"
+              fill="${textCol}"
+              font-weight="600">
           My Farms
         </text>
 
-        <g transform="translate(0,32)">
+        <g transform="translate(0,40)">
           ${farmBars}
         </g>
       </g>
