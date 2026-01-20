@@ -2,6 +2,7 @@ node_modules/
 out/
 screenshots/
 tables/
+admin/backups/
 npm-debug.log
 yarn-error.log
 package-lock.json

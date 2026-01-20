@@ -316,10 +316,69 @@ async function navigateHuman(actionOrArray) {
 const DIGITS = "0123456789";
 
 async function ocrField(key, buf) {
-  const wl = key === "name" ? null : DIGITS;
+  const wl =
+    key === "name" || key.startsWith("label_")
+      ? null
+      : DIGITS;
   const txt = (await ocrBuffer(buf, wl)).trim();
   logAction("ocr", { key, text: txt });
   return txt;
+}
+
+function decideLayoutByLabelLeft(labelText) {
+  const label = String(labelText || "")
+    .toLowerCase()
+    .replace(/[^a-z\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (/\bpower\b/.test(label)) return "power_left";
+  if (/\bkill\s+points\b/.test(label)) return "kp_left";
+  return null;
+}
+
+async function resolveTopLayout(texts, rois) {
+  let layoutA = decideLayoutByLabelLeft(texts.label_left_a);
+  if (!layoutA && rois?.label_left_a) {
+    const retry = (await ocrBuffer(rois.label_left_a, null)).trim();
+    texts.label_left_a = retry;
+    layoutA = decideLayoutByLabelLeft(texts.label_left_a);
+  }
+
+  let layoutB = decideLayoutByLabelLeft(texts.label_left_b);
+  if (!layoutB && rois?.label_left_b) {
+    const retry = (await ocrBuffer(rois.label_left_b, null)).trim();
+    texts.label_left_b = retry;
+    layoutB = decideLayoutByLabelLeft(texts.label_left_b);
+  }
+
+  let pick = null;
+  if (layoutA && layoutB) {
+    const lenA = String(texts.label_left_a || "").length;
+    const lenB = String(texts.label_left_b || "").length;
+    pick = lenB > lenA ? "B" : "A";
+  } else if (layoutA) {
+    pick = "A";
+  } else if (layoutB) {
+    pick = "B";
+  } else {
+    return null;
+  }
+
+  if (pick === "A") {
+    const leftVal = texts.value_left_a ?? "";
+    const rightVal = texts.value_right_a ?? "";
+    texts.power = layoutA === "power_left" ? leftVal : rightVal;
+    texts.kp = layoutA === "power_left" ? rightVal : leftVal;
+    texts._layout = "A_" + layoutA;
+  } else {
+    const leftVal = texts.value_left_b ?? "";
+    const rightVal = texts.value_right_b ?? "";
+    texts.power = layoutB === "power_left" ? leftVal : rightVal;
+    texts.kp = layoutB === "power_left" ? rightVal : leftVal;
+    texts._layout = "B_" + layoutB;
+  }
+
+  return texts._layout;
 }
 
 /* ──────────────────────── CH row geometry / level ──────────────────────── */
@@ -722,10 +781,27 @@ async function scanProfileOnce() {
       await sleepLog(randInt(20, 60), "between ocr fields");
     }
 
+    if (page.name === "top") {
+      const layout = await resolveTopLayout(texts, rois);
+      if (layout) {
+        logAction("top-layout", { layout });
+      }
+    }
+
     // гортай далі якщо сторінка каже page.nav
-    if (page.nav) {
-      logAction("page-nav", { page: page.name, nav: page.nav });
-      await navigateHuman(page.nav);
+    let nav = page.nav || null;
+    if (page.name === "top") {
+      if ((texts._layout === "A_kp_left" || texts._layout === "B_kp_left") && page.nav_left) {
+        nav = page.nav_left;
+      } else if ((texts._layout === "A_power_left" || texts._layout === "B_power_left") && page.nav_right) {
+        nav = page.nav_right;
+      } else if (page.nav_left) {
+        nav = page.nav_left;
+      }
+    }
+    if (nav) {
+      logAction("page-nav", { page: page.name, nav });
+      await navigateHuman(nav);
       await sleepLog(T_SETTLE + randInt(0, 150), "after page nav");
     }
   }
