@@ -234,6 +234,23 @@ export async function getActiveKvK() {
   return rows[0]?.kvk_id || null;
 }
 
+function kpPctForPower(powerAbs) {
+  const pm = powerAbs / 1_000_000;
+  if (pm >= 100) return 350;
+  if (pm >= 80) return 310;
+  if (pm >= 70) return 290;
+  if (pm >= 60) return 250;
+  if (pm >= 50) return 200;
+  if (pm >= 40) return 140;
+  if (pm >= 30) return 100;
+  return 100;
+}
+
+function computeKpGoal(powerAbs) {
+  const pct = kpPctForPower(powerAbs);
+  return Math.round(powerAbs * (pct / 100));
+}
+
 export async function endActiveKvK() {
   const { rows } = await pool.query(`
     UPDATE kvk_sessions
@@ -605,21 +622,28 @@ export async function buildStatsCardData(player_id_input) {
     [kvkStr, pidStr]
   );
   const goalsRec  = gRows[0] || { goal_kills: 0, goal_dead: 0 };
-  const goalKills = toNum(goalsRec.goal_kills, 0);
-  const goalDead  = toNum(goalsRec.goal_dead, 0);
+  const goalKillsRaw = toNum(goalsRec.goal_kills, 0);
+  const goalDeadRaw  = toNum(goalsRec.goal_dead, 0);
 
-  // DKP
-  const dkpData = computeDkpProgress(killsDone, deadDone, goalKills, goalDead);
+  // DKP (legacy)
+  const dkpData = computeDkpProgress(
+    killsDone,
+    deadDone,
+    goalKillsRaw,
+    goalDeadRaw
+  );
 
-  const killsPct = goalKills > 0 ? (killsDone / goalKills) * 100 : 0;
-  const deadPct  = goalDead  > 0 ? (deadDone  / goalDead)  * 100 : 0;
-  const avgKpPerKill = killsDone > 0 ? dKP / killsDone : 4;
-  const kpGoal = goalKills > 0 ? Math.round(goalKills * avgKpPerKill) : 0;
+  const kpGoal = computeKpGoal(curPower);
   const kpPct = kpGoal > 0 ? (dKP / kpGoal) * 100 : 0;
 
+  const goalKills = 0;
+  const goalDead  = 0;
+  const killsPct = 0;
+  const deadPct  = 0;
+
   // left to go
-  const killsLeft = Math.max(0, goalKills - killsDone);
-  const deadLeft  = Math.max(0, goalDead  - deadDone);
+  const killsLeft = 0;
+  const deadLeft  = 0;
   const kpLeft    = Math.max(0, kpGoal - dKP);
 
   // остання бойова зона
@@ -730,6 +754,7 @@ export async function buildTopListData(limit = 10) {
       p.last_update,
       g.goal_kills,
       g.goal_dead,
+      p.power_current,
       COALESCE(SUM(i.t4_kills + i.t5_kills), 0) AS killsdone,
       COALESCE(SUM(i.dead), 0)                 AS deaddone,
       COALESCE(SUM(i.kp), 0)                   AS kpdone
@@ -747,7 +772,7 @@ export async function buildTopListData(limit = 10) {
         WHERE al.farm_player_id = g.player_id
           AND al.status = 'approved'
       )
-    GROUP BY g.player_id, p.name, p.last_update, g.goal_kills, g.goal_dead
+    GROUP BY g.player_id, p.name, p.last_update, g.goal_kills, g.goal_dead, p.power_current
     `,
     [kvkStr]
   );
@@ -762,8 +787,8 @@ export async function buildTopListData(limit = 10) {
     const goalDead  = toNum(r.goal_dead, 0);
 
     const kpDone = toNum(r.kpdone, 0);
-    const avgKpPerKill = killsDone > 0 ? kpDone / killsDone : 4;
-    const kpGoal = goalKills > 0 ? Math.round(goalKills * avgKpPerKill) : 0;
+    const powerAbs = toNum(r.power_current, 0);
+    const kpGoal = computeKpGoal(powerAbs);
     const kpPct = kpGoal > 0 ? (kpDone / kpGoal) * 100 : 0;
 
     return {
@@ -775,8 +800,8 @@ export async function buildTopListData(limit = 10) {
       pct: kpPct,
       killsDone,
       deadDone,
-      goal_kills: goalKills,
-      goal_dead: goalDead,
+      goal_kills: 0,
+      goal_dead: 0,
     };
   });
 

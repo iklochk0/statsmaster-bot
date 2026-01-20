@@ -262,6 +262,10 @@ function playerCardSVG(bundle) {
   }
   function makeBar(labelText, doneVal, goalVal, offsetY) {
     const { wBase, wOver, pctRaw } = progressPieces(doneVal, goalVal, barW);
+    const hasGoal = goalVal > 0;
+    const bottomText = hasGoal
+      ? `${nfNum(doneVal)} / ${nfNum(goalVal)}`
+      : `${nfNum(doneVal)}`;
     return `
       <g transform="translate(0,${offsetY})">
         <text class="barLabel" x="0" y="-8">${safe(labelText)}</text>
@@ -288,16 +292,20 @@ function playerCardSVG(bundle) {
             : ""
         }
 
-        <text class="barText"
-              x="${barW / 2}"
-              y="${barH / 2 + 4}">
-          ${Math.round(pctRaw)}%
-        </text>
+        ${
+          hasGoal
+            ? `<text class="barText"
+                    x="${barW / 2}"
+                    y="${barH / 2 + 4}">
+                 ${Math.round(pctRaw)}%
+               </text>`
+            : ""
+        }
 
         <text class="barLabel"
               x="0"
               y="${barH + 20}">
-          ${nfNum(doneVal)} / ${nfNum(goalVal)}
+          ${bottomText}
         </text>
       </g>
     `;
@@ -370,9 +378,7 @@ function playerCardSVG(bundle) {
   }
 
   // LEFT TO GO
-  const leftToGoText = (player.role === "farm")
-    ? `Dead ${nfNum(progress.deadLeft)}`
-    : `Kills ${nfNum(progress.killsLeft)}`;
+  const leftToGoText = `KP ${nfNum(progress.kpLeft)}`;
 
   // "My Farms"
   let farmsSvg = "";
