@@ -102,7 +102,7 @@ const SCAN_PAUSE_MAX_MS = Number(process.env.SCAN_PAUSE_MAX_MS || 2000);
 const RAND_PX = Number(process.env.RAND_PX || 0);
 
 // БАЗОВИЙ ІНДЕКС (sticky): 4-й видимий рядок → 0-based = 3
-const BASE_ROW_IDX = Number(process.env.BASE_ROW_IDX ?? 3);
+const BASE_ROW_IDX = Number(process.env.BASE_ROW_IDX ?? 4);
 
 // "людські відпочинки"
 const IDLE_EVERY_MIN = Number(process.env.IDLE_EVERY_MIN || 3);
@@ -425,7 +425,7 @@ function levelRectForRow(i) {
 }
 
 function rankRectForRow(i) {
-  const col = LIST.rankCol;
+  const col = LIST.rankCol4 || LIST.rankCol;
   if (!col?.left || !col?.width || !col?.height)
     throw new Error("ui.cityHallList.rankCol missing left/width/height");
 
@@ -900,6 +900,18 @@ async function alignBaseRowToExpectedRank(expectedRank) {
   return current === expectedRank;
 }
 
+async function verifyTopRowsLevel(expected = 25, maxRow = BASE_ROW_IDX) {
+  for (let i = 0; i <= maxRow && i < LIST.rows.length; i++) {
+    const lvl = await readLevelAtRow(i);
+    if (lvl !== expected) {
+      console.log(`   Stop: row ${i} CH=${Number.isNaN(lvl) ? "?" : lvl}`);
+      logAction("stop-bad-level", { idx: i, lvl });
+      return false;
+    }
+  }
+  return true;
+}
+
 // різниця Y між сусідніми рядками — для recovery-скролу
 const ROW_DY = Math.max(20, Math.round(Math.abs(rowRefY(1) - rowRefY(0))));
 
@@ -1060,11 +1072,20 @@ async function main() {
 
   // куди пишемо бекап OCR
   const backupPath = path.join(OUT_DIR, "players_baseline.json");
+  const statePath = path.join(OUT_DIR, "scan_state.json");
   let visited = 0;
 
   // заходимо в City Hall рейтинг
   await openCityHallList();
   await humanPause();
+  if (!(await verifyTopRowsLevel(25, BASE_ROW_IDX))) return;
+
+  const state = await loadScanState(statePath);
+  if (state?.lastVisited && Number.isFinite(state.lastVisited)) {
+    visited = Math.max(0, Number(state.lastVisited));
+    const expectedRank = visited + 1;
+    await alignBaseRowToExpectedRank(expectedRank);
+  }
 
   // Етап 1: пройти верх списку до BASE_ROW_IDX-1 (тобто 0,1,2)
   for (
@@ -1072,6 +1093,7 @@ async function main() {
     i < Math.min(BASE_ROW_IDX, LIST.rows.length) && visited < COUNT;
     i++
   ) {
+    if (visited > 0) break;
     await maybeIdlePause();
 
     // якщо це не останній рядок пачки — перевіримо що там City Hall == 25
@@ -1110,6 +1132,7 @@ async function main() {
     }
 
     visited++;
+    await saveScanState(statePath, { lastVisited: visited });
     await humanPause();
     await maybeIdlePause();
   }
@@ -1117,6 +1140,7 @@ async function main() {
   // Етап 2: «липкий» BASE_ROW_IDX (3) з fallback на 4/5
   while (visited < COUNT) {
     await maybeIdlePause();
+    if (!(await verifyTopRowsLevel(25, BASE_ROW_IDX))) break;
 
     const { opened, usedIndex } = await openProfileWithFallbacks(BASE_ROW_IDX);
     if (!opened) {
@@ -1141,6 +1165,7 @@ async function main() {
     }
 
     visited++;
+    await saveScanState(statePath, { lastVisited: visited });
     await humanPause();
     await maybeIdlePause();
 
@@ -1177,6 +1202,22 @@ async function readBackupArray(filePath) {
   } catch {
     return [];
   }
+}
+
+async function loadScanState(filePath) {
+  try {
+    const txt = await fs.readFile(filePath, "utf-8");
+    const obj = JSON.parse(txt);
+    return obj && typeof obj === "object" ? obj : null;
+  } catch {
+    return null;
+  }
+}
+
+async function saveScanState(filePath, state) {
+  try {
+    await fs.writeFile(filePath, JSON.stringify(state, null, 2));
+  } catch {}
 }
 
 async function appendBackup(filePath, record) {

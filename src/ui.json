@@ -32,6 +32,13 @@
       "height": 50,
       "top0": 205,
       "refRowIndex": 0
+    },
+    "rankCol4": {
+      "left": 155,
+      "width": 50,
+      "height": 50,
+      "top0": 465,
+      "refRowIndex": 4
     }
   }
 }
