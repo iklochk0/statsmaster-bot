@@ -909,8 +909,9 @@ async function alignBaseRowToExpectedRank(expectedRank) {
   return current === expectedRank;
 }
 
-async function verifyTopRowsLevel(expected = 25, maxRow = BASE_ROW_IDX) {
-  for (let i = 0; i <= maxRow && i < LIST.rows.length; i++) {
+async function verifyRowsLevel(expected = 25, rows = []) {
+  for (const i of rows) {
+    if (i < 0 || i >= LIST.rows.length) continue;
     let lvl = await readLevelAtRow(i);
     if (lvl !== expected) {
       lvl = await readLevelAtRow(i);
@@ -922,6 +923,12 @@ async function verifyTopRowsLevel(expected = 25, maxRow = BASE_ROW_IDX) {
     }
   }
   return true;
+}
+
+async function verifyTopRowsLevel(expected = 25, maxRow = BASE_ROW_IDX) {
+  const rows = [];
+  for (let i = 0; i <= maxRow && i < LIST.rows.length; i++) rows.push(i);
+  return verifyRowsLevel(expected, rows);
 }
 
 // різниця Y між сусідніми рядками — для recovery-скролу
@@ -1086,8 +1093,8 @@ async function main() {
   const backupPath = path.join(OUT_DIR, "players_baseline.json");
   const statePath = path.join(OUT_DIR, "scan_state.json");
   let visited = 0;
-
-  // заходимо в City Hall рейтинг
+  let ghostStreak = 0;
+// заходимо в City Hall рейтинг
   await openCityHallList();
   await humanPause();
   if (!(await verifyTopRowsLevel(25, BASE_ROW_IDX))) return;
@@ -1152,17 +1159,27 @@ async function main() {
   // Етап 2: «липкий» BASE_ROW_IDX (3) з fallback на 4/5
   while (visited < COUNT) {
     await maybeIdlePause();
-    if (!(await verifyTopRowsLevel(25, BASE_ROW_IDX))) break;
+    if (!(await verifyRowsLevel(25, [BASE_ROW_IDX]))) break;
 
     const { opened, usedIndex } = await openProfileWithFallbacks(BASE_ROW_IDX);
     if (!opened) {
-      console.warn("   ! Ghost chain (4/5/6) — skip this slot");
-      logAction("ghost-chain-skip", {});
+      console.warn("   ! Ghost chain (4/5/6) -- scroll down one row");
+      logAction("ghost-chain-scroll", {});
 
-      visited++;
+      ghostStreak++;
+      if (ghostStreak >= 5) {
+        console.warn("   ! Too many ghost rows in a row, stopping");
+        logAction("ghost-chain-stop", { ghostStreak });
+        break;
+      }
+
+      await nudgeOneRowDown("ghost-skip");
+      const lastRankSeen = await readRankAtRow(BASE_ROW_IDX);
+      await saveScanState(statePath, { lastVisited: visited, lastRankSeen });
       await humanPause();
       continue;
     }
+    ghostStreak = 0;
 
     const { saved, stamp } = await handleOneProfile(opened, kvk_id);
     if (saved && stamp) {
