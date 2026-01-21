@@ -32,6 +32,8 @@ import { fileURLToPath } from "url";
 import { execa } from "execa";
 import clipboardy from "clipboardy";
 
+
+import sharp from "sharp";
 import { captureScreen } from "./capture.js";
 import { cropRegions } from "./crop.js";
 import { initOCR, ocrBuffer, closeOCR } from "./ocr.js";
@@ -461,6 +463,31 @@ function rankRectForRow(i) {
 }
 
 async function readRankAtRow(i) {
+  if (LIST.rankColFull) {
+    await captureScreen(SCREEN_PATH);
+    const rect = LIST.rankColFull;
+    const outDir = path.join(ROOT_DIR, "screenshots", "ch_ranks_full");
+    const piece = await cropRegions(SCREEN_PATH, { col: rect }, outDir);
+    const buf = piece.col;
+
+    const rowH = LIST.rows?.[i]?.rect?.height ?? 60;
+    const centerY = rowRefY(i);
+    let topRel = Math.round(centerY - rect.top - rowH / 2);
+    topRel = clamp(topRel, 0, rect.height - rowH);
+
+    const rowBuf = await sharp(buf).extract({
+      left: 0,
+      top: topRel,
+      width: Math.round(rect.width),
+      height: Math.round(rowH),
+    }).toBuffer();
+
+    const raw = rowBuf ? (await ocrBuffer(rowBuf, DIGITS)).trim() : "";
+    const n = Number((raw || "").replace(/\D/g, ""));
+    logAction("ocrRank", { row: i, rect, raw, parsed: n, topRel, rowH });
+    return Number.isFinite(n) ? n : NaN;
+  }
+
   await captureScreen(SCREEN_PATH);
   const rect = rankRectForRow(i);
   const outDir = path.join(ROOT_DIR, "screenshots", "ch_ranks");
@@ -468,24 +495,6 @@ async function readRankAtRow(i) {
   const raw = piece.rank ? (await ocrBuffer(piece.rank, "0123456789")).trim() : "";
   const n = Number((raw || "").replace(/\D/g, ""));
   logAction("ocrRank", { row: i, rect, raw, parsed: n });
-  return Number.isFinite(n) ? n : NaN;
-}
-
-async function readLevelAtRow(i) {
-  await sleepLog(50 + randInt(0, 90), "before OCR row");
-
-  const rect = levelRectForRow(i);
-
-  await captureScreen(SCREEN_PATH);
-  const key = `lv_r${i}`;
-  const outDir = path.join(ROOT_DIR, "screenshots", "ch_levels");
-  const piece = await cropRegions(SCREEN_PATH, { [key]: rect }, outDir);
-  const buf = piece[key];
-
-  const raw = buf ? (await ocrBuffer(buf, DIGITS)).trim() : "";
-  const n = Number((raw || "").replace(/\D/g, ""));
-
-  logAction("ocrRow", { row: i, rect, raw, parsed: n });
   return Number.isFinite(n) ? n : NaN;
 }
 

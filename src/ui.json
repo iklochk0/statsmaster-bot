@@ -1,26 +1,75 @@
 {
-  "screen": {
+  "screen": 
+  {
     "safe": { "left": 0, "top": 0, "width": 1280, "height": 720 }
   },
-  "flow": {
-    "openMyProfile": { "type": "tap", "rect": { "left": 5, "top": 1, "width": 80, "height": 90 }, "durMs": 240 },
-    "openRankings":  { "type": "tap", "rect": { "left": 345, "top": 570, "width": 40, "height": 40 }, "durMs": 240 },
-    "openCityHall":  { "type": "tap", "rect": { "left": 925, "top": 365, "width": 190, "height": 100 }, "durMs": 240 },
-    "closeDeath":    { "type": "tap", "rect": { "left": 1100, "top": 30, "width": 30, "height": 25 }, "durMs": 240 },
-    "closeProfile":  { "type": "tap", "rect": { "left": 1147, "top": 57, "width": 30, "height": 25 }, "durMs": 240 },
+  "flow": 
+  {
+    "openMyProfile": 
+    {
+      "type": "tap",
+      "rect": { "left": 5, "top": 1, "width": 80, "height": 90 },
+      "durMs": 240
+    },
+    "openRankings": 
+    {
+      "type": "tap",
+      "rect": { "left": 345, "top": 570, "width": 40, "height": 40 },
+      "durMs": 240
+    },
+    "openCityHall": 
+    {
+      "type": "tap",
+      "rect": { "left": 925, "top": 365, "width": 190, "height": 100 },
+      "durMs": 240
+    },
+    "closeDeath": 
+    {
+      "type": "tap",
+      "rect": { "left": 1100, "top": 30, "width": 30, "height": 25 },
+      "durMs": 240
+    },
+    "closeProfile": 
+    {
+      "type": "tap",
+      "rect": { "left": 1147, "top": 57, "width": 30, "height": 25 },
+      "durMs": 240
+    },
     "settleMs": 700
   },
-  "cityHallList": {
-    "rows": [
-      { "rect": { "left": 145, "top": 195, "width": 970, "height": 55 } },
-      { "rect": { "left": 145, "top": 275, "width": 970, "height": 55 } },
-      { "rect": { "left": 145, "top": 357, "width": 970, "height": 55 } },
-      { "rect": { "left": 145, "top": 437, "width": 970, "height": 55 } },
-      { "rect": { "left": 145, "top": 455, "width": 970, "height": 55 } },
-      { "rect": { "left": 145, "top": 535, "width": 970, "height": 55 } },
-      { "rect": { "left": 145, "top": 615, "width": 970, "height": 55 } }
+  "cityHallList": 
+  {
+    "rows": 
+    [
+      
+      {
+        "rect": { "left": 145, "top": 195, "width": 970, "height": 55 }
+      },
+      
+      {
+        "rect": { "left": 145, "top": 275, "width": 970, "height": 55 }
+      },
+      
+      {
+        "rect": { "left": 145, "top": 357, "width": 970, "height": 55 }
+      },
+      
+      {
+        "rect": { "left": 145, "top": 437, "width": 970, "height": 55 }
+      },
+      
+      {
+        "rect": { "left": 145, "top": 455, "width": 970, "height": 55 }
+      },
+      
+      {
+        "rect": { "left": 145, "top": 535, "width": 970, "height": 55 }
+      },
+      
+      {
+        "rect": { "left": 145, "top": 615, "width": 970, "height": 55 }
+      }
     ],
-
     "levelCol": { "left": 980, "width": 65, "height": 45, "top0": 200 },
     "levelCol0": { "left": 980, "width": 65, "height": 45, "top0": 200, "refRowIndex": 0 },
     "levelCol1": { "left": 980, "width": 65, "height": 45, "top0": 280, "refRowIndex": 1 },
@@ -29,8 +78,8 @@
     "levelCol4": { "left": 980, "width": 65, "height": 45, "top0": 460, "refRowIndex": 4 },
     "levelCol5": { "left": 980, "width": 65, "height": 45, "top0": 540, "refRowIndex": 5 },
     "levelCol6": { "left": 980, "width": 65, "height": 45, "top0": 620, "refRowIndex": 6 },
-
-    "rankCol": { "left": 145, "width": 60, "height": 50, "top0": 205, "refRowIndex": 0 },
-    "rankCol4": { "left": 155, "width": 50, "height": 50, "top0": 465, "refRowIndex": 4 }
+    "rankCol": { "left": 145, "width": 50, "height": 50, "top0": 205, "refRowIndex": 0 },
+    "rankCol4": { "left": 145, "width": 50, "height": 50, "top0": 465, "refRowIndex": 4 },
+    "rankColFull": { "left": 150, "top": 180, "width": 50, "height": 520 }
   }
 }
