@@ -97,6 +97,11 @@ const T_CLIP_HOST = 3000;
 const T_LONGPRESS = 360;
 
 const PRE_SCAN_SETTLE_MS = 800;
+const GHOST_SETTLE_MS = Number(process.env.GHOST_SETTLE_MS || 1600);
+const OCR_STABILIZE_MS = Number(process.env.OCR_STABILIZE_MS || 200);
+const ALIGN_SWIPE_PAUSE_MIN_MS = Number(process.env.ALIGN_SWIPE_PAUSE_MIN_MS || 1200);
+const ALIGN_SWIPE_PAUSE_MAX_MS = Number(process.env.ALIGN_SWIPE_PAUSE_MAX_MS || 2000);
+const DEBUG_RANK_COL = process.env.DEBUG_RANK_COL !== "false";
 
 const SCAN_PAUSE_MIN_MS = Number(process.env.SCAN_PAUSE_MIN_MS || 1000);
 const SCAN_PAUSE_MAX_MS = Number(process.env.SCAN_PAUSE_MAX_MS || 2000);
@@ -470,22 +475,80 @@ async function readRankAtRow(i) {
     const piece = await cropRegions(SCREEN_PATH, { col: rect }, outDir);
     const buf = piece.col;
 
-    const rowH = LIST.rows?.[i]?.rect?.height ?? 60;
+    if (buf) {
+      const fullRaw = (await ocrBuffer(buf, DIGITS)).trim();
+      const lines = fullRaw
+        .split(/\r?\n/)
+        .map((l) => l.replace(/\D/g, ""))
+        .filter(Boolean)
+        .map((n) => Number(n))
+        .filter((n) => Number.isFinite(n) && n > 0);
+
+      if (DEBUG_RANK_COL) {
+        logAction("ocrRankFull", { rect, raw: fullRaw, lines });
+        const outPath = path.join(OUT_DIR, "rankcol.png");
+        await fs.writeFile(outPath, buf);
+        logAction("ocrRankFull-saved", { path: outPath });
+      }
+
+      if (lines.length) {
+        const diffs = lines.slice(1).map((n, idx) => n - lines[idx]);
+        const usable =
+          diffs.length === 0 ||
+          diffs.filter((d) => d >= 1 && d <= 2).length / diffs.length >= 0.6;
+
+        if (usable && i <= lines.length - 1) {
+          const idx = Math.min(i, lines.length - 1);
+          const n = lines[idx];
+          logAction("ocrRank", {
+            row: i,
+            rect,
+            raw: String(n),
+            parsed: n,
+            source: "fullLines",
+          });
+          return Number.isFinite(n) ? n : NaN;
+        }
+      }
+    }
+
+    const rowStep =
+      LIST.rows?.length > 1 ? Math.abs(rowRefY(1) - rowRefY(0)) : 80;
+    const rowH = Math.max(40, Math.min(rect.height, Math.round(rowStep * 0.75)));
     const centerY = rowRefY(i);
     let topRel = Math.round(centerY - rect.top - rowH / 2);
     topRel = clamp(topRel, 0, rect.height - rowH);
 
-    const rowBuf = await sharp(buf).extract({
-      left: 0,
-      top: topRel,
-      width: Math.round(rect.width),
-      height: Math.round(rowH),
-    }).toBuffer();
+    const offsets = [-12, -6, 0, 6, 12];
+    let bestRaw = "";
+    let bestN = NaN;
+    let bestTop = topRel;
+    for (const off of offsets) {
+      const t = clamp(topRel + off, 0, rect.height - rowH);
+      const rowBuf = await sharp(buf).extract({
+        left: 0,
+        top: t,
+        width: Math.round(rect.width),
+        height: Math.round(rowH),
+      }).toBuffer();
 
-    const raw = rowBuf ? (await ocrBuffer(rowBuf, DIGITS)).trim() : "";
-    const n = Number((raw || "").replace(/\D/g, ""));
-    logAction("ocrRank", { row: i, rect, raw, parsed: n, topRel, rowH });
-    return Number.isFinite(n) ? n : NaN;
+      const raw = rowBuf ? (await ocrBuffer(rowBuf, DIGITS)).trim() : "";
+      const n = Number((raw || "").replace(/\D/g, ""));
+      if (Number.isFinite(n) && n > 0) {
+        bestRaw = raw;
+        bestN = n;
+        bestTop = t;
+        break;
+      }
+      if (raw.replace(/\D/g, "").length > bestRaw.replace(/\D/g, "").length) {
+        bestRaw = raw;
+        bestN = Number((raw || "").replace(/\D/g, ""));
+        bestTop = t;
+      }
+    }
+
+    logAction("ocrRank", { row: i, rect, raw: bestRaw, parsed: bestN, topRel: bestTop, rowH });
+    return Number.isFinite(bestN) ? bestN : NaN;
   }
 
   await captureScreen(SCREEN_PATH);
@@ -498,6 +561,73 @@ async function readRankAtRow(i) {
   return Number.isFinite(n) ? n : NaN;
 }
 
+async function readRankColumnLines() {
+  if (!LIST.rankColFull) return null;
+  await captureScreen(SCREEN_PATH);
+  const rect = LIST.rankColFull;
+  const outDir = path.join(ROOT_DIR, "screenshots", "ch_ranks_full");
+  const piece = await cropRegions(SCREEN_PATH, { col: rect }, outDir);
+  const buf = piece.col;
+  if (!buf) return null;
+
+  const fullRaw = (await ocrBuffer(buf, DIGITS)).trim();
+  const lines = fullRaw
+    .split(/\r?\n/)
+    .map((l) => l.replace(/\D/g, ""))
+    .filter(Boolean)
+    .map((n) => Number(n))
+    .filter((n) => Number.isFinite(n) && n > 0);
+
+  if (DEBUG_RANK_COL) {
+    logAction("ocrRankFull", { rect, raw: fullRaw, lines });
+    const outPath = path.join(OUT_DIR, "rankcol.png");
+    await fs.writeFile(outPath, buf);
+    logAction("ocrRankFull-saved", { path: outPath });
+  }
+
+  return lines;
+}
+
+async function findRowIndexForRank(expectedRank) {
+  if (!Number.isFinite(expectedRank)) return null;
+  const lines = await readRankColumnLines();
+  if (!lines || !lines.length) return null;
+
+  let bestIdx = -1;
+  let bestDiff = Infinity;
+  for (let i = 0; i < lines.length; i++) {
+    const diff = Math.abs(lines[i] - expectedRank);
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      bestIdx = i;
+    }
+    if (diff === 0) break;
+  }
+
+  if (bestIdx === -1 || bestDiff > 2) return null;
+  const idx = Math.min(bestIdx, LIST.rows.length - 1);
+  logAction("rank-match", { expectedRank, matched: lines[bestIdx], idx, diff: bestDiff });
+  return idx;
+}
+
+
+async function readLevelAtRow(i) {
+  await sleepLog(50 + randInt(0, 90), "before OCR row");
+
+  const rect = levelRectForRow(i);
+
+  await captureScreen(SCREEN_PATH);
+  const key = `lv_r${i}`;
+  const outDir = path.join(ROOT_DIR, "screenshots", "ch_levels");
+  const piece = await cropRegions(SCREEN_PATH, { [key]: rect }, outDir);
+  const buf = piece[key];
+
+  const raw = buf ? (await ocrBuffer(buf, DIGITS)).trim() : "";
+  const n = Number((raw || "").replace(/\D/g, ""));
+
+  logAction("ocrRow", { row: i, rect, raw, parsed: n });
+  return Number.isFinite(n) ? n : NaN;
+}
 /* ──────────────────────── screen detection helpers ──────────────────────── */
 
 function regionNameCenter() {
@@ -886,6 +1016,15 @@ async function alignBaseRowToExpectedRank(expectedRank) {
   let steps = 0, miss = 0;
   const MAX = EXPECT_ALIGN_MAX_STEPS;
 
+
+  if (LIST.rankColFull) {
+    const matchIdx = await findRowIndexForRank(expectedRank);
+    if (Number.isInteger(matchIdx)) {
+      logAction("align-visible", { expectedRank, matchIdx });
+      return true;
+    }
+  }
+
   // перше читання
   let current = await readRankAtRow(BASE_ROW_IDX);
   if (!Number.isFinite(current)) {
@@ -894,9 +1033,26 @@ async function alignBaseRowToExpectedRank(expectedRank) {
   }
 
   while (steps < MAX && Number.isFinite(current) && current !== expectedRank) {
+    if (LIST.rankColFull) {
+      const matchIdx = await findRowIndexForRank(expectedRank);
+      if (Number.isInteger(matchIdx)) {
+        logAction("align-visible", { expectedRank, matchIdx, steps });
+        return true;
+      }
+    }
+
     const delta = expectedRank - current; // + → вниз (більші ранги), − → вгору
 
-    if (Math.abs(delta) >= 4) {
+    if (LIST.rankColFull) {
+      const steps = Math.min(3, Math.abs(delta));
+      for (let s = 0; s < steps; s++) {
+        if (delta > 0) {
+          await nudgeOneRowDown("align+");
+        } else {
+          await nudgeOneRowUp("align-");
+        }
+      }
+    } else if (Math.abs(delta) >= 4) {
       await coarseScrollRows(Math.min(10, Math.abs(delta)), "align-coarse");
     } else if (delta > 0) {
       await nudgeOneRowDown("align+");
@@ -944,6 +1100,12 @@ async function verifyTopRowsLevel(expected = 25, maxRow = BASE_ROW_IDX) {
 const ROW_DY = Math.max(20, Math.round(Math.abs(rowRefY(1) - rowRefY(0))));
 
 async function nudgeOneRowDown(label="nudgeDown") {
+  if (label.includes("align")) {
+    await sleepLog(
+      randInt(ALIGN_SWIPE_PAUSE_MIN_MS, ALIGN_SWIPE_PAUSE_MAX_MS),
+      "align nudge pause"
+    );
+  }
   // список вниз (до БІЛЬШИХ номерів місця)
   const x = SAFE.left + Math.round(SAFE.width * 0.5);
   const y1 = SAFE.top + Math.round(SAFE.height * 0.70);
@@ -953,6 +1115,12 @@ async function nudgeOneRowDown(label="nudgeDown") {
 }
 
 async function nudgeOneRowUp(label="nudgeUp") {
+  if (label.includes("align")) {
+    await sleepLog(
+      randInt(ALIGN_SWIPE_PAUSE_MIN_MS, ALIGN_SWIPE_PAUSE_MAX_MS),
+      "align nudge pause"
+    );
+  }
   // список вгору (до МЕНШИХ номерів місця)
   const x = SAFE.left + Math.round(SAFE.width * 0.5);
   const y1 = SAFE.top + Math.round(SAFE.height * 0.30);
@@ -964,6 +1132,12 @@ async function nudgeOneRowUp(label="nudgeUp") {
 async function coarseScrollRows(rows, label="coarse") {
   // грубо докрутити на ~кілька рядів за раз (швидше при великому visited)
   while (rows >= 5) {
+    if (label.includes("align")) {
+      await sleepLog(
+        randInt(ALIGN_SWIPE_PAUSE_MIN_MS, ALIGN_SWIPE_PAUSE_MAX_MS),
+        "align swipe pause"
+      );
+    }
     const x = SAFE.left + Math.round(SAFE.width * 0.5);
     const y1 = SAFE.top + Math.round(SAFE.height * 0.80);
     const y2 = SAFE.top + Math.round(SAFE.height * 0.20);
@@ -971,7 +1145,15 @@ async function coarseScrollRows(rows, label="coarse") {
     await sleepLog(220 + randInt(0,120), "after coarse swipe");
     rows -= 5; // приблизно стільки «рядків» з’їдає довгий свайп
   }
-  while (rows-- > 0) await nudgeOneRowDown(label+"-tail");
+  while (rows-- > 0) {
+    if (label.includes("align")) {
+      await sleepLog(
+        randInt(ALIGN_SWIPE_PAUSE_MIN_MS, ALIGN_SWIPE_PAUSE_MAX_MS),
+        "align swipe pause"
+      );
+    }
+    await nudgeOneRowDown(label+"-tail");
+  }
 }
 
 
@@ -1109,9 +1291,10 @@ async function main() {
   if (!(await verifyTopRowsLevel(25, BASE_ROW_IDX))) return;
 
   const state = await loadScanState(statePath);
+  let expectedRank = null;
   if (state?.lastVisited && Number.isFinite(state.lastVisited)) {
     visited = Math.max(0, Number(state.lastVisited));
-    const expectedRank = Number.isFinite(state.lastRankSeen)
+    expectedRank = Number.isFinite(state.lastRankSeen)
       ? Number(state.lastRankSeen)
       : visited + 1;
     await alignBaseRowToExpectedRank(expectedRank);
@@ -1161,6 +1344,7 @@ async function main() {
     visited++;
     const lastRankSeen = await readRankAtRow(BASE_ROW_IDX);
     await saveScanState(statePath, { lastVisited: visited, lastRankSeen });
+    if (Number.isFinite(lastRankSeen)) expectedRank = lastRankSeen + 1;
     await humanPause();
     await maybeIdlePause();
   }
@@ -1170,7 +1354,13 @@ async function main() {
     await maybeIdlePause();
     if (!(await verifyRowsLevel(25, [BASE_ROW_IDX]))) break;
 
-    const { opened, usedIndex } = await openProfileWithFallbacks(BASE_ROW_IDX);
+    let preferredIdx = BASE_ROW_IDX;
+    if (Number.isFinite(expectedRank)) {
+      const matchIdx = await findRowIndexForRank(expectedRank);
+      if (Number.isInteger(matchIdx)) preferredIdx = matchIdx;
+    }
+
+    const { opened, usedIndex } = await openProfileWithFallbacks(preferredIdx);
     if (!opened) {
       console.warn("   ! Ghost chain (4/5/6) -- scroll down one row");
       logAction("ghost-chain-scroll", {});
@@ -1182,9 +1372,28 @@ async function main() {
         break;
       }
 
+      const lastRankSeenBefore = await readRankAtRow(BASE_ROW_IDX);
       await nudgeOneRowDown("ghost-skip");
+      await sleepLog(GHOST_SETTLE_MS, "after ghost swipe");
+
       const lastRankSeen = await readRankAtRow(BASE_ROW_IDX);
-      await saveScanState(statePath, { lastVisited: visited, lastRankSeen });
+      await sleepLog(OCR_STABILIZE_MS, "rank stabilize");
+      const confirmRank = await readRankAtRow(BASE_ROW_IDX);
+      const stableRank =
+        Number.isFinite(confirmRank) && confirmRank > 0
+          ? confirmRank
+          : lastRankSeen;
+
+      await saveScanState(statePath, { lastVisited: visited, lastRankSeen: stableRank });
+      if (Number.isFinite(stableRank)) expectedRank = stableRank + 1;
+
+      if (Number.isFinite(lastRankSeenBefore) && lastRankSeenBefore > 0) {
+        const expectedRank = lastRankSeenBefore + 1;
+        if (!Number.isFinite(stableRank) || stableRank !== expectedRank) {
+          await alignBaseRowToExpectedRank(expectedRank);
+        }
+      }
+
       await humanPause();
       continue;
     }
@@ -1205,6 +1414,7 @@ async function main() {
     visited++;
     const lastRankSeen = await readRankAtRow(BASE_ROW_IDX);
     await saveScanState(statePath, { lastVisited: visited, lastRankSeen });
+    if (Number.isFinite(lastRankSeen)) expectedRank = lastRankSeen + 1;
     await humanPause();
     await maybeIdlePause();
 
