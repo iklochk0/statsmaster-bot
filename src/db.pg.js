@@ -137,6 +137,14 @@ export async function initSchema() {
     );
   `);
 
+  // Discord ↔ player_id
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS discord_links (
+      discord_id TEXT PRIMARY KEY,
+      player_id  BIGINT NOT NULL REFERENCES players(player_id) ON DELETE CASCADE
+    );
+  `);
+
   // Прив'язки main ↔ farm (заявки)
   // status:
   //   pending   -> чекає на адміна
@@ -848,6 +856,41 @@ export async function fetchPlayerSnapshot(playerId) {
     [String(playerId)]
   );
   return rows[0] || null;
+}
+
+// Discord ↔ player_id links
+export async function fetchLink(discordId) {
+  const { rows } = await pool.query(
+    `SELECT player_id FROM discord_links WHERE discord_id=$1`,
+    [String(discordId)]
+  );
+  return rows[0]?.player_id ?? null;
+}
+
+export async function upsertDiscordLink(discordId, playerId) {
+  await pool.query(
+    `
+    INSERT INTO discord_links(discord_id, player_id)
+    VALUES ($1, $2)
+    ON CONFLICT (discord_id)
+    DO UPDATE SET player_id = EXCLUDED.player_id
+    `,
+    [String(discordId), String(playerId)]
+  );
+}
+
+export async function deleteDiscordLink(discordId) {
+  await pool.query(`DELETE FROM discord_links WHERE discord_id=$1`, [
+    String(discordId),
+  ]);
+}
+
+export async function setLink(discordId, playerId) {
+  await upsertDiscordLink(discordId, playerId);
+}
+
+export async function removeLink(discordId) {
+  await deleteDiscordLink(discordId);
 }
 
 // коротке імʼя (для DM після approve/reject)

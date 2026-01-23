@@ -14,6 +14,7 @@ export default function Home() {
   const [zoneTag, setZoneTag] = useState("");
   const [isScoring, setIsScoring] = useState(true);
   const [importFile, setImportFile] = useState<File | null>(null);
+  const [linksFile, setLinksFile] = useState<File | null>(null);
   const [backupInfo, setBackupInfo] = useState<{ xlsxPath: string; zipPath: string } | null>(null);
   const [statusMsg, setStatusMsg] = useState<string>("");
   const [busy, setBusy] = useState<string | null>(null);
@@ -124,6 +125,32 @@ export default function Home() {
       data.ok
         ? `Import OK. Rows: ${data.result?.importedCount ?? 0}`
         : `Import failed: ${data.error}`
+    );
+    await refreshStatus();
+    setBusy(null);
+  }
+
+  async function runLinksImport() {
+    if (!linksFile) {
+      setStatusMsg("Select an .xlsx file first.");
+      return;
+    }
+    setBusy("links");
+
+    const form = new FormData();
+    form.append("file", linksFile);
+
+    const r = await fetch("/api/import-links", {
+      method: "POST",
+      headers,
+      body: form,
+    });
+    const data: ApiResult<{ discord_links: { ok: number; skipped: number }; account_links: { ok: number; skipped: number } }> =
+      await r.json();
+    setStatusMsg(
+      data.ok
+        ? `Links import OK. discord_links=${data.result?.discord_links?.ok ?? 0}, account_links=${data.result?.account_links?.ok ?? 0}`
+        : `Links import failed: ${data.error}`
     );
     await refreshStatus();
     setBusy(null);
@@ -311,6 +338,18 @@ export default function Home() {
             </label>
             <button onClick={runImport} disabled={busy === "import"}>
               Import
+            </button>
+          </div>
+        </div>
+
+        <div className="card">
+          <h2>Import Links</h2>
+          <div className="row">
+            <input type="file" accept=".xlsx" onChange={(e) => setLinksFile(e.target.files?.[0] ?? null)} />
+          </div>
+          <div className="row">
+            <button onClick={runLinksImport} disabled={busy === "links"}>
+              Import discord_links + account_links
             </button>
           </div>
         </div>

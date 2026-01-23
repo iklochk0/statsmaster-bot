@@ -1111,7 +1111,7 @@ async function coarseScrollRows(rows, label="coarse") {
 }
 
 
-async function backToCityHallListSafe(visitedSoFar = 0) {
+async function backToCityHallListSafe(visitedSoFar = 0, expectedRank = null, recoverAlign = true) {
   // 1) Закриваємо Dead-деталі: рівно ОДИН раз (X або Back на оверлеї)
   const useBack = Math.random() < P_BACK_IN_DEATH;
   if (useBack) {
@@ -1135,13 +1135,17 @@ async function backToCityHallListSafe(visitedSoFar = 0) {
     await openCityHallList();
     await sleepLog(T_SETTLE + T_JITTER(), "after reopen list");
 
-    // 1) Грубо докручуємо за лічильником до приблизного місця
-    const approxRows = Math.max(0, visitedSoFar - BASE_ROW_IDX);
-    await coarseScrollRows(approxRows, "recover-coarse");
+    if (recoverAlign) {
+      // 1) Грубо докручуємо за лічильником до приблизного місця
+      const approxRows = Math.max(0, visitedSoFar - BASE_ROW_IDX);
+      await coarseScrollRows(approxRows, "recover-coarse");
 
-    // 2) Точно вирівнюємось за OCR рангу у BASE_ROW_IDX
-    const expectedRank = visitedSoFar + 1;
-    await alignBaseRowToExpectedRank(expectedRank);
+      // 2) Точно вирівнюємось за OCR рангу у BASE_ROW_IDX
+      const targetRank = Number.isFinite(expectedRank)
+        ? expectedRank
+        : visitedSoFar + 1;
+      await alignBaseRowToExpectedRank(targetRank);
+    }
   }
 
   // 4) Без пост-нуджів: довіряємось “липкому” 4-му рядку.
@@ -1355,7 +1359,7 @@ async function main() {
               await appendBackup(backupPath, stamp);
             }
 
-            const ok = await backToCityHallListSafe(visited);
+            const ok = await backToCityHallListSafe(visited, expectedRank, false);
             if (!ok) {
               console.warn("   ! Can't return to list — stop");
               logAction("back-failed", {});
@@ -1388,7 +1392,7 @@ async function main() {
       await appendBackup(backupPath, stamp);
     }
 
-    const ok = await backToCityHallListSafe(visited);
+    const ok = await backToCityHallListSafe(visited, expectedRank, false);
     if (!ok) {
       console.warn("   ! Can't return to list — stop");
       logAction("back-failed", {});
