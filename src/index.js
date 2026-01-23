@@ -467,50 +467,13 @@ function rankRectForRow(i) {
   return { left, top, width, height };
 }
 
-async function readRankAtRow(i) {
-  if (LIST.rankColFull) {
+async function readRankAtRow(i, useFull = false) {
+  if (useFull && LIST.rankColFull) {
     await captureScreen(SCREEN_PATH);
     const rect = LIST.rankColFull;
     const outDir = path.join(ROOT_DIR, "screenshots", "ch_ranks_full");
     const piece = await cropRegions(SCREEN_PATH, { col: rect }, outDir);
     const buf = piece.col;
-
-    if (buf) {
-      const fullRaw = (await ocrBuffer(buf, DIGITS)).trim();
-      const lines = fullRaw
-        .split(/\r?\n/)
-        .map((l) => l.replace(/\D/g, ""))
-        .filter(Boolean)
-        .map((n) => Number(n))
-        .filter((n) => Number.isFinite(n) && n > 0);
-
-      if (DEBUG_RANK_COL) {
-        logAction("ocrRankFull", { rect, raw: fullRaw, lines });
-        const outPath = path.join(OUT_DIR, "rankcol.png");
-        await fs.writeFile(outPath, buf);
-        logAction("ocrRankFull-saved", { path: outPath });
-      }
-
-      if (lines.length) {
-        const diffs = lines.slice(1).map((n, idx) => n - lines[idx]);
-        const usable =
-          diffs.length === 0 ||
-          diffs.filter((d) => d >= 1 && d <= 2).length / diffs.length >= 0.6;
-
-        if (usable && i <= lines.length - 1) {
-          const idx = Math.min(i, lines.length - 1);
-          const n = lines[idx];
-          logAction("ocrRank", {
-            row: i,
-            rect,
-            raw: String(n),
-            parsed: n,
-            source: "fullLines",
-          });
-          return Number.isFinite(n) ? n : NaN;
-        }
-      }
-    }
 
     const rowStep =
       LIST.rows?.length > 1 ? Math.abs(rowRefY(1) - rowRefY(0)) : 80;
@@ -580,7 +543,7 @@ async function readRankColumnLines() {
 
   if (DEBUG_RANK_COL) {
     logAction("ocrRankFull", { rect, raw: fullRaw, lines });
-    const outPath = path.join(OUT_DIR, "rankcol.png");
+    const outPath = path.join(ROOT_DIR, "screenshots", "rankcol.png");
     await fs.writeFile(outPath, buf);
     logAction("ocrRankFull-saved", { path: outPath });
   }
@@ -1016,16 +979,7 @@ async function alignBaseRowToExpectedRank(expectedRank) {
   let steps = 0, miss = 0;
   const MAX = EXPECT_ALIGN_MAX_STEPS;
 
-
-  if (LIST.rankColFull) {
-    const matchIdx = await findRowIndexForRank(expectedRank);
-    if (Number.isInteger(matchIdx)) {
-      logAction("align-visible", { expectedRank, matchIdx });
-      return true;
-    }
-  }
-
-  // перше читання
+  // first read
   let current = await readRankAtRow(BASE_ROW_IDX);
   if (!Number.isFinite(current)) {
     await nudgeOneRowDown("align-prime");
@@ -1041,11 +995,11 @@ async function alignBaseRowToExpectedRank(expectedRank) {
       }
     }
 
-    const delta = expectedRank - current; // + → вниз (більші ранги), − → вгору
+    const delta = expectedRank - current;
 
     if (LIST.rankColFull) {
-      const steps = Math.min(3, Math.abs(delta));
-      for (let s = 0; s < steps; s++) {
+      const n = Math.min(3, Math.abs(delta));
+      for (let s = 0; s < n; s++) {
         if (delta > 0) {
           await nudgeOneRowDown("align+");
         } else {
@@ -1063,8 +1017,8 @@ async function alignBaseRowToExpectedRank(expectedRank) {
     steps++;
     const next = await readRankAtRow(BASE_ROW_IDX);
     if (!Number.isFinite(next)) {
-      if (++miss >= 2) break;        // двічі промазали OCR — виходимо
-      continue;                      // ще одна спроба вирівнятись
+      if (++miss >= 2) break;
+      continue;
     }
     miss = 0;
     current = next;
@@ -1292,12 +1246,14 @@ async function main() {
 
   const state = await loadScanState(statePath);
   let expectedRank = null;
+  let recoveryPending = false;
   if (state?.lastVisited && Number.isFinite(state.lastVisited)) {
     visited = Math.max(0, Number(state.lastVisited));
     expectedRank = Number.isFinite(state.lastRankSeen)
       ? Number(state.lastRankSeen)
       : visited + 1;
     await alignBaseRowToExpectedRank(expectedRank);
+    recoveryPending = true;
   }
 
   // Етап 1: пройти верх списку до BASE_ROW_IDX-1 (тобто 0,1,2)
@@ -1352,12 +1308,25 @@ async function main() {
   // Етап 2: «липкий» BASE_ROW_IDX (3) з fallback на 4/5
   while (visited < COUNT) {
     await maybeIdlePause();
-    if (!(await verifyRowsLevel(25, [BASE_ROW_IDX]))) break;
 
     let preferredIdx = BASE_ROW_IDX;
-    if (Number.isFinite(expectedRank)) {
-      const matchIdx = await findRowIndexForRank(expectedRank);
+    if (recoveryPending && Number.isFinite(expectedRank)) {
+      let matchIdx = await findRowIndexForRank(expectedRank);
+      if (!Number.isInteger(matchIdx)) {
+        await alignBaseRowToExpectedRank(expectedRank);
+        matchIdx = await findRowIndexForRank(expectedRank);
+      }
       if (Number.isInteger(matchIdx)) preferredIdx = matchIdx;
+    }
+
+    const lvl = await readLevelAtRow(preferredIdx);
+    if (Number.isFinite(lvl) && lvl !== 0 && lvl !== 25) {
+      console.warn(`   Stop: row ${preferredIdx} CH=${lvl}`);
+      logAction("stop-bad-level", { idx: preferredIdx, lvl });
+      break;
+    }
+    if (!Number.isFinite(lvl) || lvl === 0) {
+      logAction("level-unreadable", { idx: preferredIdx, lvl });
     }
 
     const { opened, usedIndex } = await openProfileWithFallbacks(preferredIdx);
@@ -1372,32 +1341,47 @@ async function main() {
         break;
       }
 
-      const lastRankSeenBefore = await readRankAtRow(BASE_ROW_IDX);
-      await nudgeOneRowDown("ghost-skip");
+      const extraIdx = BASE_ROW_IDX + 3;
+      await nudgeOneRowDown("ghost-extra");
       await sleepLog(GHOST_SETTLE_MS, "after ghost swipe");
 
-      const lastRankSeen = await readRankAtRow(BASE_ROW_IDX);
-      await sleepLog(OCR_STABILIZE_MS, "rank stabilize");
-      const confirmRank = await readRankAtRow(BASE_ROW_IDX);
-      const stableRank =
-        Number.isFinite(confirmRank) && confirmRank > 0
-          ? confirmRank
-          : lastRankSeen;
+      if (extraIdx < LIST.rows.length && Number.isFinite(expectedRank)) {
+        const extraRank = await readRankAtRow(extraIdx, true);
+        if (extraRank === expectedRank) {
+          const openedExtra = await openProfileFromRow(extraIdx, 2);
+          if (openedExtra) {
+            const { saved, stamp } = await handleOneProfile(openedExtra, kvk_id);
+            if (saved && stamp) {
+              await appendBackup(backupPath, stamp);
+            }
 
-      await saveScanState(statePath, { lastVisited: visited, lastRankSeen: stableRank });
-      if (Number.isFinite(stableRank)) expectedRank = stableRank + 1;
+            const ok = await backToCityHallListSafe(visited);
+            if (!ok) {
+              console.warn("   ! Can't return to list — stop");
+              logAction("back-failed", {});
+              break;
+            }
 
-      if (Number.isFinite(lastRankSeenBefore) && lastRankSeenBefore > 0) {
-        const expectedRank = lastRankSeenBefore + 1;
-        if (!Number.isFinite(stableRank) || stableRank !== expectedRank) {
-          await alignBaseRowToExpectedRank(expectedRank);
+            visited++;
+            const lastRankSeen = await readRankAtRow(BASE_ROW_IDX, true);
+            await saveScanState(statePath, { lastVisited: visited, lastRankSeen });
+            if (Number.isFinite(lastRankSeen)) expectedRank = lastRankSeen + 1;
+            await humanPause();
+            await maybeIdlePause();
+            continue;
+          }
         }
       }
+
+      const lastRankSeen = await readRankAtRow(BASE_ROW_IDX, true);
+      await saveScanState(statePath, { lastVisited: visited, lastRankSeen });
+      if (Number.isFinite(lastRankSeen)) expectedRank = lastRankSeen + 1;
 
       await humanPause();
       continue;
     }
     ghostStreak = 0;
+    if (recoveryPending) recoveryPending = false;
 
     const { saved, stamp } = await handleOneProfile(opened, kvk_id);
     if (saved && stamp) {

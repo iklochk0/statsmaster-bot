@@ -30,10 +30,6 @@
 //   "теперішні значення" = baseline + Σ(usіх imports)
 //   "твій внесок у KvK"  = Σ(imports де is_scoring=true)
 //
-// DKP = 50% kills + 50% dead
-//   kills = T4+T5
-//   100% kills-цілі дає 50% DKP
-//   100% dead-цілі дає 50% DKP
 //
 // ВАЖЛИВО: у всіх запитах player_id в PG ми шлемо як string,
 // бо це BIGINT у Postgres.
