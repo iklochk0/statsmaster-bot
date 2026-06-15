@@ -16,7 +16,7 @@
 </style>
 </head>
 <body>
-<h2>StatsMaster — Calibrate regions</h2>
+<h2>StatsMaster - Calibrate regions</h2>
 <div class="panel">
   <input type="file" id="file" accept="image/png,image/jpeg" />
   <button id="loadJson">Load JSON</button>
@@ -37,7 +37,7 @@
 </div>
 
 <canvas id="cvs"></canvas>
-<p><small>Поради: ЛКМ — тягни, щоб створити/оновити прямокутник для обраного тегу. Клавіші 1–9 — вибір тегу. Стрілки — нудж 1 px (з Shift = 5 px). Прямокутник малюється у нативних px зображення.</small></p>
+<p><small>Drag with the left mouse button to create or update the selected region. Keys 1-9 select a tag. Arrow keys nudge by 1 px, or 5 px with Shift. Regions use the image's native pixel size.</small></p>
 
 <h3>regions.json</h3>
 <textarea id="out" readonly></textarea>
@@ -77,7 +77,6 @@ function draw(){
   if(!imgLoaded) return;
   ctx.clearRect(0,0,cvs.width,cvs.height);
   ctx.drawImage(img, 0, 0);
-  // overlay rectangles
   for(const [k,r] of Object.entries(regions)){
     if(!r) continue;
     ctx.lineWidth = 2;
@@ -120,7 +119,7 @@ window.addEventListener('mouseup', ()=>{ dragging=false; });
 
 window.addEventListener('keydown',(e)=>{
   const r = regions[currentKey];
-  if(e.key>='1' && e.key<='8'){
+  if(e.key>='1' && e.key<='9'){
     const map = ['id','name','power','dead','t5','t4','t3','t2','t1'];
     setActive(map[+e.key-1]);
   }
@@ -144,7 +143,7 @@ document.getElementById('file').addEventListener('change', e=>{
     cvs.width = img.naturalWidth;
     cvs.height = img.naturalHeight;
     imgLoaded = true;
-    info.textContent = `Image: ${cvs.width}×${cvs.height}`;
+    info.textContent = `Image: ${cvs.width}x${cvs.height}`;
     ctx.font = '12px system-ui';
     draw();
   };

@@ -1,5 +1,3 @@
-// src/bot.js
-//
 // Discord bot for KvK stats:
 // - imports KvK sessions/goals
 // - player stats commands (!stats / !me)
@@ -40,9 +38,6 @@ import {
 
 import { exportFullBackup } from "./excelExport.js";
 
-
-
-// healthcheck server
 const PORT = process.env.PORT || 3000;
 http
   .createServer((req, res) => {
@@ -50,12 +45,9 @@ http
     res.end("ok\n");
   })
   .listen(PORT, () => {
-    console.log("healthcheck server on :" + PORT);
+    console.log("healthcheck server on:" + PORT);
   });
 
-
-
-// config
 const ADMIN_ROLE_IDS = String(process.env.ADMIN_ROLE_IDS || "")
   .split(",")
   .map((s) => s.trim())
@@ -70,12 +62,8 @@ const IMG_CACHE_MAX   = Number(process.env.IMG_CACHE_MAX || 120);
 
 const HEAVY_CMD_COOLDOWN_S = Number(process.env.HEAVY_CMD_COOLDOWN_S || 4);
 
-// logging
 const LOG_LEVEL = (process.env.LOG_LEVEL || "info").toLowerCase();
 const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
-
-
-
 
 function nowIso() {
   return new Date().toISOString();
@@ -132,7 +120,6 @@ const log = {
   error: (o) => logAt("error", o),
 };
 
-// helpers
 function channelAllowed(msg) {
   if (!PUBLIC_CHANNEL_ID) return true;
   if (!msg.guild) return true;
@@ -1370,7 +1357,6 @@ client.on("messageCreate", async (msg) => {
       return;
     }
 
-    // ===== NEW: !topKills ${nf(r.killsDone)}/${nf(r.goal_kills)} !top Kills ${nf(r.killsDone)}/${nf(r.goal_kills)} !top k =====
     const isTopKills =
       cmd === "topkills" ||
       (cmd === "top" && (args[0] || "").toLowerCase() === "kills") ||
@@ -1379,7 +1365,6 @@ client.on("messageCreate", async (msg) => {
     if (isTopKills) {
       const argOffset = cmd === "top" ? 1 : 0;
 
-      // ---- limit ----
       const rawLimitArg = args[argOffset];
       const rawLimit = parseInt(rawLimitArg, 10);
       const hasLimit = Number.isFinite(rawLimit);
@@ -1387,7 +1372,6 @@ client.on("messageCreate", async (msg) => {
       const rows = await buildTopListData(limit);
       rows.sort((a, b) => b.killsDone - a.killsDone);
 
-      // ---- text mode ----
       const textArgIndex = argOffset + (hasLimit ? 1 : 0);
       const asText = (args[textArgIndex] || "").toLowerCase() === "text";
       if (asText) {
@@ -1400,7 +1384,6 @@ client.on("messageCreate", async (msg) => {
         return void msg.reply(lines.join("\n"));
       }
 
-      // ---- meta ----
       const ts = await fetchMaxUpdateFor(
         rows.map((r) => r.player_id).filter(Boolean)
       );
@@ -1411,7 +1394,6 @@ client.on("messageCreate", async (msg) => {
         sortBy: "kills",
       };
 
-      // ---- cache ----
       const cacheKey =
         `topkills:${limit}:` +
         rows.map((r) => `${r.player_id}:${r.killsDone}`).join("|");

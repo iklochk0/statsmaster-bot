@@ -1,40 +1,28 @@
-// src/excelImport.js
+// Imports KvK battle deltas from an Excel worksheet.
 //
-// Використання:
+// Usage:
 //   node src/excelImport.js <file.xlsx> <zone_tag> <is_scoring:true|false>
 //
-// Приклад:
+// Example:
 //   node src/excelImport.js ./zone4_day1.xlsx zone4 true
 //
-// Що робить:
-//   - читає Excel (кожен рядок = внесок гравця за інтервал бою)
-//   - НЕ створює нових гравців: оновлює тільки тих, хто вже є в players (baseline з OCR/ручний)
-//   - перетворює ABS "Current Power"/"Power" → ΔPower (відносно baseline + Σ попередніх імпортів у цьому KvK)
-//   - вставляє дельти в imports (з ідемпотентністю через row_sig)
-//   - оновлює тільки name + last_update у players
-//   - надсилає короткий звіт у ADMIN_IMPORT_WEBHOOK_URL
+// Behavior:
+// - reads one battle interval per row
+// - updates only existing players from the OCR/manual baseline
+// - converts absolute Power into a delta against baseline plus previous imports
+// - inserts idempotent import rows using row_sig
+// - sends an optional summary to ADMIN_IMPORT_WEBHOOK_URL
 //
-// Колонки Excel, які підтримуються:
+// Supported Excel columns:
 //   "Character ID" / "Governor ID" / "ID" / "Id" / "id"           -> player_id
 //   "Username" / "Name" / "Governor Name" / "name"                -> name
-//   "Current Power" / "Power"                                     -> ABS Power (ми переводимо у Δ перед вставкою)
-//   "Total Kill Points"                                           -> ΔKP
-//   "Deaths" / "Dead" / "Deaths Count"                            -> ΔDead
-//   "T4 Kills" / "T4"                                             -> ΔT4
-//   "T5 Kills" / "T5"                                             -> ΔT5
+//   "Current Power" / "Power"                                     -> absolute Power
+//   "Total Kill Points"                                           -> KP delta
+//   "Deaths" / "Dead" / "Deaths Count"                            -> dead delta
+//   "T4 Kills" / "T4"                                             -> T4 delta
+//   "T5 Kills" / "T5"                                             -> T5 delta
 //
-// is_scoring=true → цей внесок зараховується у прогрес / DKP.
-//
-// Ідемпотентність:
-//   - при старті додасть колонку imports.row_sig (якщо її нема)
-//   - створить індекс-унікальність на (kvk_id, player_id, zone_tag, is_scoring, row_sig)
-//   - row_sig = md5(player_id|zone|is_scoring|dPower|dKP|dDead|dT4|dT5)
-//   - повторний імпорт того самого файлу стає no-op.
-//
-// Примітка:
-//   - Якщо у твоєму джерелі "Total Kill Points" раптом прийде як ABS, треба буде аналогічно
-//     конвертувати у Δ (аналог блокові з power). Наразі вважаємо, що KP/T4/T5/Dead — дельти.
-//
+// is_scoring=true includes the row in progress and DKP calculations.
 
 import "dotenv/config";
 import XLSX from "xlsx";
@@ -72,10 +60,6 @@ function md5(s) {
   return createHash("md5").update(String(s)).digest("hex");
 }
 
-/**
- * Відправляє короткий звіт в адмін-канал через вебхук.
- * Ми показуємо ТІЛЬКИ тих, кого реально імпортили (тобто тих, хто існував у players).
- */
 async function sendWebhookSummary({ zoneTag, isScoring, kvk_id, importedRows }) {
   const hook = process.env.ADMIN_IMPORT_WEBHOOK_URL;
   if (!hook) return;
@@ -96,7 +80,7 @@ async function sendWebhookSummary({ zoneTag, isScoring, kvk_id, importedRows }) 
     .join("\n");
 
   const bodyText = [
-    `✅ Excel import done`,
+    `Excel import done`,
     `KvK: ${kvk_id}`,
     `Zone: ${zoneTag}`,
     `Scoring: ${isScoring ? "yes" : "no"}`,
@@ -113,7 +97,7 @@ async function sendWebhookSummary({ zoneTag, isScoring, kvk_id, importedRows }) 
       body: JSON.stringify({ content: bodyText }),
     });
   } catch (err) {
-    console.error("⚠️ Failed to send webhook summary:", err);
+    console.error("Failed to send webhook summary:", err);
   }
 }
 

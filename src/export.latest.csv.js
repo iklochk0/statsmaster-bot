@@ -1,4 +1,3 @@
-// src/export.latest.csv.js — вивантаження таблиці latest у CSV
 import "dotenv/config";
 import fs from "fs/promises";
 import path from "path";
@@ -7,18 +6,17 @@ import { initSchema, closeDb } from "./db.pg.js";
 import { Pool } from "pg";
 
 const __filename = fileURLToPath(import.meta.url);
-const __dirname  = path.dirname(__filename);
-const ROOT_DIR   = path.resolve(__dirname, "..");
-const OUT_DIR    = path.join(ROOT_DIR, "out");
+const __dirname = path.dirname(__filename);
+const ROOT_DIR = path.resolve(__dirname, "..");
+const OUT_DIR = path.join(ROOT_DIR, "out");
 
 async function main() {
   await initSchema();
   const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false }
+    ssl: { rejectUnauthorized: false },
   });
 
-  // ⚠️ заміна kp → kills
   const { rows } = await pool.query(`
     SELECT player_id, name, updated_at, power, kills, dead, t1, t2, t3, t4, t5
     FROM latest
@@ -27,21 +25,31 @@ async function main() {
 
   await pool.end();
 
-  // ⚠️ також заміна в заголовках
-  const header = ["player_id", "name", "updated_at", "power", "kills", "dead", "t1", "t2", "t3", "t4", "t5"];
+  const header = [
+    "player_id",
+    "name",
+    "updated_at",
+    "power",
+    "kills",
+    "dead",
+    "t1",
+    "t2",
+    "t3",
+    "t4",
+    "t5",
+  ];
 
   const csv = [
     header.join(","),
-    ...rows.map(r =>
+    ...rows.map((r) =>
       header
-        .map(h => {
+        .map((h) => {
           const v = r[h];
           const s = v === null || v === undefined ? "" : String(v);
-          // просте екранування лапок і ком
           return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
         })
         .join(",")
-    )
+    ),
   ].join("\n");
 
   await fs.mkdir(OUT_DIR, { recursive: true });
@@ -50,7 +58,7 @@ async function main() {
     `latest-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.csv`
   );
   await fs.writeFile(outPath, csv, "utf8");
-  console.log("✅ CSV saved:", path.relative(ROOT_DIR, outPath));
+  console.log("CSV saved:", path.relative(ROOT_DIR, outPath));
 
   await closeDb();
 }

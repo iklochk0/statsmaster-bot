@@ -1,31 +1,17 @@
-// src/parse.js
-
-// нормалізуємо OCR-текст в число
-// приклади що це ковтає:
-//   "88,900,106" -> 88900106
-//   "8 765 432"  -> 8765432
-//   "1.234.567"  -> 1234567
-// якщо не знаходить цифр -> 0
+// Normalizes OCR number strings such as "88,900,106", "8 765 432",
+// and "1.234.567" into plain numbers. Returns 0 when no digits exist.
 function toNum(str) {
   if (str == null) return 0;
-  // знайти перший блок типу "123 456 789"
   const m = String(str).match(/\d[\d\s,.\u00A0]*/);
   if (!m) return 0;
-  // викинути все що не цифра
   const cleaned = m[0].replace(/[^\d]/g, "");
   const n = Number(cleaned);
   return Number.isFinite(n) ? n : 0;
 }
 
 /**
- * texts — це сирі OCR-поля з scanProfileOnce():
- *   texts.id
- *   texts.name
- *   texts.power
- *   texts.kp  (інколи гра пише "Kill Points")
- *   texts.kills (деякі профілі можуть підписувати просто "Kills", але це теж KP)
- *   texts.dead
- *   texts.t1 ... texts.t5  (кіли по тірах)
+ * Parses raw OCR fields from scanProfileOnce().
+ * Some layouts label Kill Points as either KP or Kills.
  */
 export function parseStats(texts) {
   const labelLA = String(texts.label_left_a ?? "").toLowerCase();
@@ -102,10 +88,7 @@ export function parseStats(texts) {
 
   return {
     id: toNum(
-      texts.id ??
-      texts.player_id ??
-      texts.playerId ??
-      texts.pid
+      texts.id ?? texts.player_id ?? texts.playerId ?? texts.pid
     ),
     name: String(texts.name ?? "")
       .replace(/\s+/g, " ")

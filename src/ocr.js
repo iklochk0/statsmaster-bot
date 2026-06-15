@@ -1,5 +1,5 @@
-// src/ocr.js
 import { createWorker } from "tesseract.js";
+
 let worker;
 let lastWhitelist = null;
 

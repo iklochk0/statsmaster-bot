@@ -1,39 +1,11 @@
-// src/db.pg.js
+// PostgreSQL access layer for KvK sessions, player baselines, goals,
+// battle imports, Discord links, and farm account relationships.
 //
-// Центральна логіка БД під нову модель.
+// Player card data is derived from:
+// - current values: baseline from players + all imports
+// - KvK contribution: scoring imports only
 //
-// Головні концепти:
-//
-// players
-//   - baseline на старт KvK (power_current / kp_current / dead_current / t4/t5_current)
-//   - ми це чіпаємо тільки через OCR або ручний фікс адміна
-//
-// kvk_sessions
-//   - активна KvK сесія
-//
-// kvk_goals
-//   - цілі на цей KvK для кожного акаунта
-//   - main -> таблиця по power
-//   - farm -> dead=600k, kills=0
-//
-// imports
-//   - дельти з Excel за певний інтервал бою
-//   - is_scoring=true означає бойовий внесок (рахується у прогрес)
-//
-// account_links
-//   - звʼязок main ↔ farm
-//   - статус pending / approved / rejected
-//   - одна ферма не може бути в двох мейнів (UNIQUE на farm_player_id)
-//   - якщо запис approved => цей farm вважається фермою
-//
-// Як ми рахуємо показник для картки:
-//   "теперішні значення" = baseline + Σ(usіх imports)
-//   "твій внесок у KvK"  = Σ(imports де is_scoring=true)
-//
-//
-// ВАЖЛИВО: у всіх запитах player_id в PG ми шлемо як string,
-// бо це BIGINT у Postgres.
-//
+// player_id values are passed as strings because Postgres stores them as BIGINT.
 
 import "dotenv/config";
 import { Pool } from "pg";
@@ -51,7 +23,7 @@ function toNum(v, def = 0) {
   return Number.isFinite(n) ? n : def;
 }
 
-// таблиця вимог (з твого екселю на скріні) для МЕЙН акаунта
+// Main-account KvK targets by current power bracket.
 function computeGoalsForMainByPower(powerAbs) {
   const pm = Number(powerAbs || 0) / 1_000_000;
 
@@ -73,7 +45,6 @@ function computeGoalsForMainByPower(powerAbs) {
   return           { goal_kills:  4_000_000, goal_dead:   450_000 };
 }
 
-// фермерська ціль
 function computeGoalsForFarm() {
   return {
     goal_kills: 0,
@@ -81,37 +52,31 @@ function computeGoalsForFarm() {
   };
 }
 
-// DKP шкала: повністю виконав свої цілі = 10_000 DKP
-// kills і dead дають по 50% кожен
+// Completing both goals maps to 10,000 DKP. Kills and dead count equally.
 function computeDkpProgress(killsDone, deadDone, goalKills, goalDead) {
   const gKills = toNum(goalKills, 0);
   const gDead  = toNum(goalDead, 0);
 
-  // частка виконання по кожній метриці (може бути >1 при оверкапі)
   const killsFrac = gKills > 0 ? killsDone / gKills : 0;
   const deadFrac  = gDead  > 0 ? deadDone  / gDead  : 0;
 
-  // середнє 50/50
-  const avgFrac = (killsFrac + deadFrac) / 2; // 1.0 = виконав план на 100%
+  const avgFrac = (killsFrac + deadFrac) / 2;
 
-  // DKP ми показуємо на красивій шкалі 0..10_000 (і вище, якщо оверкап)
   const dkpGoal = 10_000;
   const dkpNow  = Math.round(avgFrac * dkpGoal);
 
-  // pct для бейджа зверху (відсоток)
   const pctRaw = avgFrac * 100;
 
   return {
-    goal_dkp: dkpGoal,  // 10,000
-    dkpDone:  dkpNow,   // типу 237, 8750, 13200...
-    pct:      pctRaw,   // 0..∞%, використовується для бейджа і барів % текстом
+    goal_dkp: dkpGoal,
+    dkpDone: dkpNow,
+    pct: pctRaw,
   };
 }
 
 /* ───────────────── schema init ───────────────── */
 
 export async function initSchema() {
-  // KvK сесії
   await pool.query(`
     CREATE TABLE IF NOT EXISTS kvk_sessions (
       kvk_id      BIGSERIAL PRIMARY KEY,
@@ -121,7 +86,6 @@ export async function initSchema() {
     );
   `);
 
-  // Гравці (baseline на старті KvK, з OCR)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS players (
       player_id           BIGINT PRIMARY KEY,
@@ -137,7 +101,6 @@ export async function initSchema() {
     );
   `);
 
-  // Discord ↔ player_id
   await pool.query(`
     CREATE TABLE IF NOT EXISTS discord_links (
       discord_id TEXT PRIMARY KEY,
@@ -145,11 +108,6 @@ export async function initSchema() {
     );
   `);
 
-  // Прив'язки main ↔ farm (заявки)
-  // status:
-  //   pending   -> чекає на адміна
-  //   approved  -> це ферма цього мейна
-  //   rejected  -> адмін відхилив
   await pool.query(`
     CREATE TABLE IF NOT EXISTS account_links (
       request_id BIGSERIAL PRIMARY KEY,
@@ -168,7 +126,6 @@ export async function initSchema() {
     ON account_links(farm_player_id);
   `);
 
-  // Цілі гравців на KvK
   await pool.query(`
     CREATE TABLE IF NOT EXISTS kvk_goals (
       kvk_id        BIGINT NOT NULL REFERENCES kvk_sessions(kvk_id) ON DELETE CASCADE,
@@ -187,7 +144,6 @@ export async function initSchema() {
     );
   `);
 
-  // Дельти з Excel (кожен імпорт — внесок за один період)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS imports (
       import_id    BIGSERIAL PRIMARY KEY,
@@ -271,7 +227,7 @@ export async function endActiveKvK() {
   return rows[0]?.kvk_id || null;
 }
 
-/* ───────────────── baseline з OCR ─────────────────
+/* ───────────────── OCR baseline upsert ─────────────────
    upsertBaselineFromOCR(kvk_id, scanRow)
    scanRow = {
      player_id,
@@ -283,9 +239,9 @@ export async function endActiveKvK() {
      t5
    }
 
-   - апсерт у players (baseline)
-   - якщо goals ще нема → створюємо як main (по таблиці power)
-   - якщо goals вже є → не трогаємо goals (бо могли вже вручну міняти)
+   - upserts the players baseline
+   - creates default main goals when no goals exist
+   - preserves existing goals because admins may edit them manually
 */
 export async function upsertBaselineFromOCR(kvk_id, scanRow, client = null) {
   const db = client || pool;
@@ -298,7 +254,6 @@ export async function upsertBaselineFromOCR(kvk_id, scanRow, client = null) {
   const t4Abs    = toNum(scanRow.t4, 0);
   const t5Abs    = toNum(scanRow.t5, 0);
 
-  // baseline у players
   await db.query(
     `
     INSERT INTO players (
@@ -332,7 +287,6 @@ export async function upsertBaselineFromOCR(kvk_id, scanRow, client = null) {
     ]
   );
 
-  // створюємо goals тільки якщо їх ще нема
   const { rows: chk } = await db.query(
     `SELECT 1 FROM kvk_goals
      WHERE kvk_id=$1 AND player_id=$2`,
@@ -365,13 +319,8 @@ export async function upsertBaselineFromOCR(kvk_id, scanRow, client = null) {
   }
 }
 
-/* ───────────────── цілі при зміні ролі ─────────────────
+/* ───────────────── role-based goal recalculation ─────────────────
    recalcGoalsForRoleChange(player_id,'farm'|'main')
-   - бере active KvK
-   - читає baseline з players
-   - якщо 'farm' => goal_dead=600k, goal_kills=0
-   - якщо 'main' => таблиця по power
-   - апдейтить kvk_goals для цього KvK
 */
 export async function recalcGoalsForRoleChange(player_id, newRole) {
   const kvk_id = await getActiveKvK();
@@ -433,7 +382,7 @@ export async function recalcGoalsForRoleChange(player_id, newRole) {
   };
 }
 
-/* ───────────────── ручний фікс baseline адміном ───────────────── */
+/* ───────────────── admin baseline update ───────────────── */
 export async function adminUpdatePlayerSnapshot(player_id, patch = {}) {
   const pidStr = String(player_id);
 
@@ -475,7 +424,6 @@ export async function adminUpdatePlayerSnapshot(player_id, patch = {}) {
 
 /* ───────────────── farm/main helpers ───────────────── */
 
-// чи є player_id фермою (approved-заявка існує як farm_player_id)
 async function isApprovedFarm(pidStr) {
   const { rows } = await pool.query(
     `SELECT 1 FROM account_links
@@ -487,7 +435,6 @@ async function isApprovedFarm(pidStr) {
   return !!rows.length;
 }
 
-// всі ферми мейна (approved), з їх прогресом по dead
 async function fetchFarmsForOwner(kvk_id, main_pid_str) {
   const kvkStr = String(kvk_id);
 
@@ -534,13 +481,7 @@ async function fetchFarmsForOwner(kvk_id, main_pid_str) {
 }
 
 /* ───────────────── buildStatsCardData ─────────────────
-   Все для картки (!stats / !me)
-   Включно з:
-   - baseline
-   - сума внеску
-   - DKP
-   - остання зона бою
-   - ферми (якщо це main)
+   Builds all fields used by !stats and !me cards.
 */
 export async function buildStatsCardData(player_id_input) {
   const kvk_id = await getActiveKvK();
@@ -549,7 +490,6 @@ export async function buildStatsCardData(player_id_input) {
   const pidStr = String(player_id_input);
   const kvkStr = String(kvk_id);
 
-  // baseline
   const { rows: snapRows } = await pool.query(
     `SELECT player_id,
             name,
@@ -566,10 +506,8 @@ export async function buildStatsCardData(player_id_input) {
   if (!snapRows.length) return null;
   const snap = snapRows[0];
 
-  // роль акаунта: ферма = є approved запис як farm_player_id
   const role = (await isApprovedFarm(pidStr)) ? "farm" : "main";
 
-  // Σ всіх дельт = "поточні значення"
   const { rows: allDelts } = await pool.query(
     `SELECT
         COALESCE(SUM(power),0)    AS tot_power,
@@ -593,7 +531,6 @@ export async function buildStatsCardData(player_id_input) {
 
   const updated_at = all.max_ts || snap.last_update;
 
-  // Σ бойових дельт (is_scoring=true) = "твій вклад"
   const { rows: scoreDelts } = await pool.query(
     `SELECT
         COALESCE(SUM(power),0)    AS d_power,
@@ -609,7 +546,7 @@ export async function buildStatsCardData(player_id_input) {
   );
   const sc = scoreDelts[0] || {};
 
-  const dPower = toNum(sc.d_power, 0); // може бути мінус (power падає)
+  const dPower = toNum(sc.d_power, 0);
   const dKP    = toNum(sc.d_kp, 0);
   const dDead  = toNum(sc.d_dead, 0);
   const dT4    = toNum(sc.d_t4, 0);
@@ -618,7 +555,6 @@ export async function buildStatsCardData(player_id_input) {
   const killsDone = dT4 + dT5;
   const deadDone  = dDead;
 
-  // goals
   const { rows: gRows } = await pool.query(
     `SELECT goal_kills, goal_dead
      FROM kvk_goals
@@ -629,7 +565,6 @@ export async function buildStatsCardData(player_id_input) {
   const goalKillsRaw = toNum(goalsRec.goal_kills, 0);
   const goalDeadRaw  = toNum(goalsRec.goal_dead, 0);
 
-  // DKP (legacy)
   const dkpData = computeDkpProgress(
     killsDone,
     deadDone,
@@ -645,12 +580,10 @@ export async function buildStatsCardData(player_id_input) {
   const killsPct = 0;
   const deadPct  = 0;
 
-  // left to go
   const killsLeft = 0;
   const deadLeft  = 0;
   const kpLeft    = Math.max(0, kpGoal - dKP);
 
-  // остання бойова зона
   const { rows: lastZoneRows } = await pool.query(
     `SELECT zone_tag
      FROM imports
@@ -687,7 +620,6 @@ export async function buildStatsCardData(player_id_input) {
     };
   }
 
-  // ферми (тільки якщо це main)
   let farmsBundle = { farms: [] };
   if (role === "main") {
     farmsBundle = await fetchFarmsForOwner(kvk_id, pidStr);
@@ -740,10 +672,7 @@ export async function buildStatsCardData(player_id_input) {
 }
 
 /* ───────────────── buildTopListData ─────────────────
-   Для !kvk top:
-   - беремо тільки мейнів
-     (= тих, хто НЕ є farm_player_id у approved звʼязку)
-   - ранжуємо по DKP%
+   Returns main accounts ranked by current KP progress percentage.
 */
 export async function buildTopListData(limit = 10) {
   const kvk_id = await getActiveKvK();
@@ -782,8 +711,6 @@ export async function buildTopListData(limit = 10) {
   );
 
   const out = baseRows.map((r) => {
-    // бойовий вклад (тільки scoring)
-
     const killsDone = toNum(r.killsdone, 0);
     const deadDone  = toNum(r.deaddone, 0);
 
@@ -815,9 +742,7 @@ export async function buildTopListData(limit = 10) {
   return out.slice(0, lim);
 }
 
-/* ───────────────── простий snapshot-топ по power/kp ─────────────────
-   для !top [kp|power]
-*/
+/* ───────────────── snapshot top by power or KP ───────────────── */
 export async function fetchTopSnapshot(by = "kp", limit = 10) {
   const col = by === "power" ? "power_current" : "kp_current";
   const { rows } = await pool.query(
@@ -835,9 +760,8 @@ export async function fetchTopSnapshot(by = "kp", limit = 10) {
   return rows;
 }
 
-/* ───────────────── дрібні хелпери для бота ───────────────── */
+/* ───────────────── bot helpers ───────────────── */
 
-// юзається в !link щоб перевірити що player існує
 export async function fetchPlayerSnapshot(playerId) {
   const { rows } = await pool.query(
     `
@@ -858,7 +782,6 @@ export async function fetchPlayerSnapshot(playerId) {
   return rows[0] || null;
 }
 
-// Discord ↔ player_id links
 export async function fetchLink(discordId) {
   const { rows } = await pool.query(
     `SELECT player_id FROM discord_links WHERE discord_id=$1`,
@@ -893,7 +816,6 @@ export async function removeLink(discordId) {
   await deleteDiscordLink(discordId);
 }
 
-// коротке імʼя (для DM після approve/reject)
 export async function fetchPlayerBasic(playerId) {
   const { rows } = await pool.query(
     `SELECT player_id, name
@@ -904,7 +826,6 @@ export async function fetchPlayerBasic(playerId) {
   return rows[0] || null;
 }
 
-// max timestamp для кількох player_id (для Updated: у топі)
 export async function fetchMaxUpdateFor(playerIds) {
   if (!playerIds.length) return null;
   const clean = playerIds.map((x) => String(x));
@@ -919,9 +840,8 @@ export async function fetchMaxUpdateFor(playerIds) {
   return rows[0]?.ts || null;
 }
 
-/* ───────────────── заявки на ферми ───────────────── */
+/* ───────────────── farm link requests ───────────────── */
 
-// створити pending-запит на лінк ферми
 export async function createFarmLinkRequest(mainId, farmId, discordId) {
   const { rows } = await pool.query(
     `
@@ -936,10 +856,9 @@ export async function createFarmLinkRequest(mainId, farmId, discordId) {
     `,
     [String(mainId), String(farmId), String(discordId)]
   );
-  return rows[0]; // {request_id: ...}
+  return rows[0];
 }
 
-// апрув (тільки якщо ще pending)
 export async function approveFarmLink(requestId) {
   const { rows } = await pool.query(
     `
@@ -958,7 +877,6 @@ export async function approveFarmLink(requestId) {
   return rows[0] || null;
 }
 
-// реджект (тільки якщо ще pending)
 export async function rejectFarmLink(requestId) {
   const { rows } = await pool.query(
     `
@@ -1071,7 +989,6 @@ export async function removeFarmLink(farmId) {
   );
 }
 
-/* ───────────────── закрити пул ───────────────── */
 export async function closeDb() {
   await pool.end().catch(() => {});
 }

@@ -25,7 +25,6 @@ export async function cropRegions(screenPath, regions, outDir = "./screenshots/r
     await fs.mkdir(outDir, { recursive: true });
   }
 
-  // Дізнаємось розмір зображення ОДИН раз
   const meta = await sharp(screenPath).metadata();
   if (DEBUG_CROP) {
     console.log("Image size:", meta.width, "x", meta.height);
@@ -33,28 +32,26 @@ export async function cropRegions(screenPath, regions, outDir = "./screenshots/r
 
   const out = {};
   for (const [key, r] of Object.entries(regions)) {
-    // Логи для дебага
     if (DEBUG_CROP) {
       console.log("Cropping:", key, r);
     }
 
-    // Перевірка координат проти фактичного розміру екрану
     validateRect(key, r, meta.width, meta.height);
 
-    // ВАЖЛИВО: новий sharp() КОЖНОГО разу
-    const buf = await sharp(screenPath).extract({
-      left: Math.round(r.left),
-      top: Math.round(r.top),
-      width: Math.round(r.width),
-      height: Math.round(r.height),
-    }).png().toBuffer();
+    const buf = await sharp(screenPath)
+      .extract({
+        left: Math.round(r.left),
+        top: Math.round(r.top),
+        width: Math.round(r.width),
+        height: Math.round(r.height),
+      })
+      .png()
+      .toBuffer();
 
-    // Зберігаємо сирий кроп для візуальної перевірки
     if (DEBUG_CROP) {
       await fs.writeFile(`${outDir}/${key}.png`, buf);
     }
 
-    // Підготовка для OCR: ч/б + нормалізація + масштаб ×2
     out[key] = await sharp(buf)
       .grayscale()
       .normalise()
