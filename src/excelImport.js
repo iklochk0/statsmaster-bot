@@ -156,7 +156,8 @@ export async function importExcelFile(filePath, zoneTagArg, scoringArg) {
       row["Governor ID"] ??
       row["ID"] ??
       row["Id"] ??
-      row["id"];
+      row["id"] ??
+      row["ID персонажа"];
     if (!pidRaw) continue;
     const pidStr = String(pidRaw).replace(/\D/g, "");
     if (pidStr) allIdsRaw.add(pidStr);
@@ -207,7 +208,8 @@ export async function importExcelFile(filePath, zoneTagArg, scoringArg) {
         row["Governor ID"] ??
         row["ID"] ??
         row["Id"] ??
-        row["id"];
+        row["id"] ??
+        row["ID персонажа"];
       if (!pidRaw) continue;
       const pidStr = String(pidRaw).replace(/\D/g, "");
       if (!pidStr) continue;
@@ -219,11 +221,13 @@ export async function importExcelFile(filePath, zoneTagArg, scoringArg) {
         row["Name"] ??
         row["Governor Name"] ??
         row["name"] ??
+        row["Имя пользователя"] ??
         "";
 
       let curPowerAbs =
         parseNum(row["Current Power"]) ??
         parseNum(row["Power"]) ??
+        parseNum(row["Мощь"]) ??
         null;
 
       if (curPowerAbs !== null) {
@@ -231,22 +235,27 @@ export async function importExcelFile(filePath, zoneTagArg, scoringArg) {
         if (curPowerAbs > 10_000_000_000) curPowerAbs = null;
       }
 
-      const dKP = parseNum(row["Total Kill Points"]) ?? 0;
+      const dKP =
+        parseNum(row["Total Kill Points"]) ??
+        parseNum(row["Суммарные очки убийств"]) ??
+        0;
 
       const dDead =
         parseNum(row["Deaths"]) ??
         parseNum(row["Dead"]) ??
         parseNum(row["Deaths Count"]) ??
-        0;
+        ((parseNum(row["Смерти T4"]) ?? 0) + (parseNum(row["Смерти T5"]) ?? 0));
 
       const dT4 =
         parseNum(row["T4 Kills"]) ??
         parseNum(row["T4"]) ??
+        parseNum(row["Убийства T4"]) ??
         0;
 
       const dT5 =
         parseNum(row["T5 Kills"]) ??
         parseNum(row["T5"]) ??
+        parseNum(row["Убийства T5"]) ??
         0;
 
       let dPower = 0;

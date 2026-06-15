@@ -1,11 +1,16 @@
-// src/wipe.all.js — FULL DROP of bot-related DB objects (no recreate).
-// Run: ALLOW_WIPE=YES node src/wipe.all.js
+// Drops all bot-managed database objects from the public schema.
+// Usage: ALLOW_WIPE=YES node src/wipe.all.js
 
 import "dotenv/config";
 import { Pool } from "pg";
 
 if (process.env.ALLOW_WIPE !== "YES") {
-  console.error("❌ Set ALLOW_WIPE=YES to allow wiping the database.");
+  console.error("Set ALLOW_WIPE=YES to allow wiping the database.");
+  process.exit(1);
+}
+
+if (!process.env.DATABASE_URL) {
+  console.error("DATABASE_URL is required.");
   process.exit(1);
 }
 
@@ -14,7 +19,6 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false },
 });
 
-// Objects to drop (in 'public' schema)
 const OBJECTS = [
   "cursor",
   "discord_links",
@@ -22,7 +26,7 @@ const OBJECTS = [
   "kvk_goals",
   "kvk_periods",
   "kvk_progress",
-  "latest",     // може бути table або view
+  "latest",
   "players",
   "runs",
   "stats",
@@ -68,17 +72,18 @@ END $$;
 `;
 
 (async () => {
-  console.log("⚠️  Wiping DB…");
+  console.log("Wiping database objects...");
+
   try {
     await pool.query("BEGIN");
     await pool.query(SQL);
     await pool.query("COMMIT");
-    console.log("✅ Done. All listed objects dropped (no re-create).");
+    console.log("Done. All listed objects were dropped.");
   } catch (e) {
-    await pool.query("ROLLBACK").catch(()=>{});
-    console.error("❌ Wipe failed:", e.message);
+    await pool.query("ROLLBACK").catch(() => {});
+    console.error("Wipe failed:", e.message);
     process.exitCode = 1;
   } finally {
-    await pool.end().catch(()=>{});
+    await pool.end().catch(() => {});
   }
 })();
